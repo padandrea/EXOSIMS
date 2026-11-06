@@ -9,7 +9,30 @@ from EXOSIMS.Prototypes.OpticalSystem import OpticalSystem
 
 
 class LIFEOpticalSystem(OpticalSystem):
-    """LIFE mid-infrared nulling interferometer optical system."""
+    """LIFE mid-infrared nulling interferometer optical system.
+
+    Args:
+        baseline_ratio (float):
+            Imaging-to-nulling baseline ratio. Defaults to 6.0.
+        **specs (dict):
+            Additional EXOSIMS OpticalSystem configuration parameters.
+
+    Attributes:
+        baseline_ratio (float):
+            Ratio of imaging baseline to nulling baseline.
+    """
+
+    def __init__(self, baseline_ratio=6.0, **specs):
+        """Initialize the LIFE optical system."""
+        baseline_ratio = float(baseline_ratio)
+
+        if not np.isfinite(baseline_ratio) or baseline_ratio <= 0:
+            raise ValueError("baseline_ratio must be finite and positive.")
+
+        super().__init__(**specs)
+
+        self.baseline_ratio = baseline_ratio
+        self._outspec["baseline_ratio"] = baseline_ratio
 
     def populate_observingModes(self, observingModes):
         """Helper method to parse input observingMode dictionaries and assign default

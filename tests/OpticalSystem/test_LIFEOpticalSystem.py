@@ -21,3 +21,36 @@ def test_mid_ir_observing_mode():
     optical_system = LIFEOpticalSystem(**specs)
 
     assert optical_system.observingModes[0]["lam"].to_value(u.um) == pytest.approx(15.0)
+
+
+@pytest.mark.parametrize(
+    ("configured_ratio", "expected_ratio"),
+    [
+        (None, 6.0),
+        (8.0, 8.0),
+    ],
+)
+def test_baseline_ratio_configuration(configured_ratio, expected_ratio):
+    """Verify the default ratio and configuration overrides."""
+    path = resource_path("test-scripts/template_minimal.json")
+
+    with open(path, encoding="utf-8") as file:
+        specs = json.load(file)
+
+    if configured_ratio is not None:
+        specs["baseline_ratio"] = configured_ratio
+
+    optical_system = LIFEOpticalSystem(**specs)
+
+    assert optical_system.baseline_ratio == expected_ratio
+    assert optical_system._outspec["baseline_ratio"] == expected_ratio
+
+
+@pytest.mark.parametrize(
+    "invalid_ratio",
+    [0.0, -1.0, float("nan"), float("inf")],
+)
+def test_invalid_baseline_ratio(invalid_ratio):
+    """Reject nonpositive and nonfinite baseline ratios."""
+    with pytest.raises(ValueError, match="baseline_ratio"):
+        LIFEOpticalSystem(baseline_ratio=invalid_ratio)
