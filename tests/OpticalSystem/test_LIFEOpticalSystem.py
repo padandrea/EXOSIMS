@@ -76,3 +76,33 @@ def test_get_collector_positions_reference():
         positions.to_value(u.m),
         expected.to_value(u.m),
     )
+
+def test_get_baselines_rotation():
+    """Verify pairwise baselines and 90-degree array rotation."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+    life.baseline_ratio = 6.0
+
+    baselines = life.get_baselines(
+        14.5 * u.m,
+        np.array([0, 90]) * u.deg,
+    )
+
+    assert baselines.shape == (2, 4, 4, 2)
+
+    np.testing.assert_allclose(
+        baselines[0, 0, 2].to_value(u.m),
+        [-14.5, 0.0],
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        baselines[1, 0, 2].to_value(u.m),
+        [0.0, -14.5],
+        atol=1e-12,
+    )
+
+    np.testing.assert_allclose(
+        baselines[0].to_value(u.m),
+        -np.swapaxes(baselines[0].to_value(u.m), 0, 1),
+        atol=1e-12,
+    )

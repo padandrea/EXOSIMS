@@ -272,8 +272,56 @@ class LIFEOpticalSystem(OpticalSystem):
     # ----------------------------------------------------------------
     # Baseline geometry and rotation
     # ----------------------------------------------------------------
-    # TODO: get_baselines()
-    # Calculate pairwise baseline vectors for different array rotations.
+
+    def get_baselines(
+        self,
+        nulling_baseline: u.Quantity,
+        rotation_angles: u.Quantity,
+    ) -> u.Quantity:
+        """Calculate pairwise baseline vectors for the rotating LIFE array.
+
+        Args:
+            nulling_baseline (astropy.units.Quantity):
+                Nulling baseline with length units.
+            rotation_angles (astropy.units.Quantity):
+                Scalar or 1D array of rotation angles.
+
+        Returns:
+            astropy.units.Quantity:
+                Baseline vectors with shape (n_rotations, 4, 4, 2),
+                in metres. Entry [a, j, k] is r_j - r_k.
+        """
+        if not isinstance(rotation_angles, u.Quantity):
+            raise TypeError("rotation_angles must be an Astropy Quantity.")
+
+        angles = np.atleast_1d(rotation_angles.to_value(u.rad))
+
+        if angles.ndim != 1 or not np.all(np.isfinite(angles)):
+            raise ValueError("rotation_angles must be finite and 1D.")
+
+        positions = self.get_collector_positions(
+            nulling_baseline
+        ).to_value(u.m)
+
+        x = positions[None, :, 0]
+        y = positions[None, :, 1]
+
+        cos_a = np.cos(angles)[:, None]
+        sin_a = np.sin(angles)[:, None]
+
+        rotated = np.stack(
+            [
+                x * cos_a - y * sin_a,
+                x * sin_a + y * cos_a,
+            ],
+            axis=-1,
+        )
+
+        baselines = (
+            rotated[:, :, None, :] - rotated[:, None, :, :]
+        )
+
+        return baselines * u.m
 
     # ================================================================
     # Stage 2 — Interferometry
