@@ -1,6 +1,7 @@
 """Tests for the LIFE nulling interferometer optical system."""
 
 import json
+import numpy as np
 
 import astropy.units as u
 import pytest
@@ -54,3 +55,24 @@ def test_invalid_baseline_ratio(invalid_ratio):
     """Reject nonpositive and nonfinite baseline ratios."""
     with pytest.raises(ValueError, match="baseline_ratio"):
         LIFEOpticalSystem(baseline_ratio=invalid_ratio)
+
+def test_get_collector_positions_reference():
+    """Verify the LIFE reference X-array geometry."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+    life.baseline_ratio = 6.0
+
+    positions = life.get_collector_positions(14.5 * u.m)
+
+    expected = np.array(
+        [
+            [-7.25, -43.5],
+            [-7.25, 43.5],
+            [7.25, -43.5],
+            [7.25, 43.5],
+        ]
+    ) * u.m
+
+    np.testing.assert_allclose(
+        positions.to_value(u.m),
+        expected.to_value(u.m),
+    )

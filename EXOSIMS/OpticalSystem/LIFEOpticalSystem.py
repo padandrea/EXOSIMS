@@ -22,6 +22,12 @@ class LIFEOpticalSystem(OpticalSystem):
             Ratio of imaging baseline to nulling baseline.
     """
 
+    # ================================================================
+    # Stage 0 — Initialization
+    # ================================================================
+    # Configure the LIFE instrument and initialize EXOSIMS interfaces.
+
+
     def __init__(self, baseline_ratio=6.0, **specs):
         """Initialize the LIFE optical system."""
         baseline_ratio = float(baseline_ratio)
@@ -201,3 +207,100 @@ class LIFEOpticalSystem(OpticalSystem):
                 allModes[0]["detectionMode"] = True
 
         self.populate_observingModes_extra()
+
+
+    # ================================================================
+    # Stage 1 — Geometry and spectrum
+    # ================================================================
+
+    # ----------------------------------------------------------------
+    # Array geometry
+    # ----------------------------------------------------------------
+
+    def get_collector_positions(self, nulling_baseline: u.Quantity) -> u.Quantity:
+        """Calculate the four collector positions of the LIFE X-array.
+
+        The array is centered at the origin. The imaging baseline is
+        calculated from the nulling baseline and baseline_ratio.
+
+        Args:
+            nulling_baseline (astropy.units.Quantity):
+                Nulling baseline with physical length units.
+
+        Returns:
+            astropy.units.Quantity:
+                Collector positions with shape (4, 2), in metres.
+                Each row contains the (x, y) coordinates of a collector.
+
+        Raises:
+            TypeError:
+                If nulling_baseline is not an Astropy Quantity.
+            ValueError:
+                If the baseline is not a positive finite scalar length.
+        """
+        if not isinstance(nulling_baseline, u.Quantity):
+            raise TypeError("nulling_baseline must be an Astropy Quantity.")
+
+        try:
+            b_null = nulling_baseline.to_value(u.m)
+        except u.UnitConversionError as exc:
+            raise ValueError("nulling_baseline must have length units.") from exc
+
+        if np.ndim(b_null) != 0 or not np.isfinite(b_null) or b_null <= 0:
+            raise ValueError("nulling_baseline must be finite and positive.")
+
+        b_img = self.baseline_ratio * b_null
+
+        positions = np.array(
+            [
+                [-b_null / 2, -b_img / 2],
+                [-b_null / 2, +b_img / 2],
+                [+b_null / 2, -b_img / 2],
+                [+b_null / 2, +b_img / 2],
+            ],
+            dtype=float,
+        )
+
+        return positions * u.m
+
+    # ----------------------------------------------------------------
+    # Spectral configuration
+    # ----------------------------------------------------------------
+    # TODO: get_spectral_bins()
+    # Calculate wavelength centers and widths for the LIFE channels.
+
+    # ----------------------------------------------------------------
+    # Baseline geometry and rotation
+    # ----------------------------------------------------------------
+    # TODO: get_baselines()
+    # Calculate pairwise baseline vectors for different array rotations.
+
+    # ================================================================
+    # Stage 2 — Interferometry
+    # ================================================================
+    # TODO: get_transmission()
+    # Calculate left/right Fourier transmission and phase chopping.
+
+    # ================================================================
+    # Stage 3 — Photon rates
+    # ================================================================
+    # TODO: get_photon_rates()
+    # Calculate planet, stellar leakage, zodiacal, exozodiacal
+    # and detector photon rates.
+
+    # ================================================================
+    # Stage 4 — Detection
+    # ================================================================
+    # TODO: calc_life_snr()
+    # TODO: calc_life_int_time()
+    # Calculate matched-filter SNR and required integration time.
+
+    # ================================================================
+    # Stage 5 — EXOSIMS compatibility
+    # ================================================================
+    # TODO: Cp_Cb_Csp()
+    # TODO: calc_intTime()
+    # TODO: calc_dMag_per_intTime()
+    # TODO: ddMag_dt()
+    # TODO: calc_saturation_dMag()
+    # Connect LIFE calculations to the EXOSIMS OpticalSystem API.
