@@ -266,8 +266,76 @@ class LIFEOpticalSystem(OpticalSystem):
     # ----------------------------------------------------------------
     # Spectral configuration
     # ----------------------------------------------------------------
-    # TODO: get_spectral_bins()
-    # Calculate wavelength centers and widths for the LIFE channels.
+
+    def get_spectral_bins(
+        self,
+        wavelength_min: u.Quantity,
+        wavelength_max: u.Quantity,
+        resolving_power: float,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Calculate LIFE wavelength bins at constant nominal resolution.
+
+        Uses the same geometric binning convention as LIFEsimFT.
+        The final bin may extend beyond wavelength_max.
+
+        Args:
+            wavelength_min (astropy.units.Quantity):
+                Minimum wavelength.
+            wavelength_max (astropy.units.Quantity):
+                Maximum wavelength.
+            resolving_power (float):
+                Nominal spectral resolving power R = lambda / delta_lambda.
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity]:
+                Wavelength bin centers and widths, both in metres.
+
+        Raises:
+            TypeError:
+                If wavelength inputs are not Astropy Quantities.
+            ValueError:
+                If wavelengths or resolving power are invalid.
+        """
+        if not isinstance(wavelength_min, u.Quantity):
+            raise TypeError("wavelength_min must be an Astropy Quantity.")
+
+        if not isinstance(wavelength_max, u.Quantity):
+            raise TypeError("wavelength_max must be an Astropy Quantity.")
+
+        try:
+            lam_min = wavelength_min.to_value(u.m)
+            lam_max = wavelength_max.to_value(u.m)
+        except u.UnitConversionError as exc:
+            raise ValueError("Wavelengths must have length units.") from exc
+
+        if (
+            np.ndim(lam_min) != 0
+            or np.ndim(lam_max) != 0
+            or not np.isfinite(lam_min)
+            or not np.isfinite(lam_max)
+            or lam_min <= 0
+            or lam_max <= lam_min
+        ):
+            raise ValueError("Wavelength limits must be finite and ordered.")
+
+        resolving_power = float(resolving_power)
+
+        if not np.isfinite(resolving_power) or resolving_power <= 0:
+            raise ValueError("resolving_power must be finite and positive.")
+
+        # Geometric wavelength bins, matching LIFEsimFT.
+        step = 1.0 + 1.0 / resolving_power
+
+        n_bins = int(
+            np.ceil(np.log(lam_max / lam_min) / np.log1p(1.0 / resolving_power))
+        )
+
+        edges = lam_min * step ** np.arange(n_bins + 1)
+
+        centers = (edges[:-1] + edges[1:]) / 2
+        widths = edges[1:] - edges[:-1]
+
+        return centers * u.m, widths * u.m
 
     # ----------------------------------------------------------------
     # Baseline geometry and rotation

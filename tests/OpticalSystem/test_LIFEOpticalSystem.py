@@ -106,3 +106,41 @@ def test_get_baselines_rotation():
         -np.swapaxes(baselines[0].to_value(u.m), 0, 1),
         atol=1e-12,
     )
+
+def test_get_spectral_bins_reference():
+    """Verify LIFE spectral bins against the LIFEsimFT convention."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    centers, widths = life.get_spectral_bins(
+        4.0 * u.um,
+        18.5 * u.um,
+        33.3,
+    )
+
+    assert len(centers) == 52
+    assert len(widths) == 52
+
+    # The first bin starts at 4 um.
+    lower_edges = centers - widths / 2
+    upper_edges = centers + widths / 2
+
+    np.testing.assert_allclose(
+        lower_edges[0].to_value(u.um),
+        4.0,
+        atol=1e-12,
+    )
+
+    # The final bin covers the upper wavelength limit.
+    assert lower_edges[-1] < 18.5 * u.um
+    assert upper_edges[-1] >= 18.5 * u.um
+
+    # Check the geometric spacing.
+    ratios = lower_edges[1:] / lower_edges[:-1]
+
+    np.testing.assert_allclose(
+        ratios.to_value(u.dimensionless_unscaled),
+        1.0 + 1.0 / 33.3,
+        rtol=1e-12,
+    )
+
+    assert np.all(widths > 0 * u.m)
