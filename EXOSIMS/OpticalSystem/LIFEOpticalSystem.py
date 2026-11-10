@@ -391,11 +391,107 @@ class LIFEOpticalSystem(OpticalSystem):
 
         return baselines * u.m
 
+
     # ================================================================
     # Stage 2 — Interferometry
     # ================================================================
-    # TODO: get_transmission()
-    # Calculate left/right Fourier transmission and phase chopping.
+
+    def get_transmission(
+        self,
+        nulling_baseline: u.Quantity,
+        rotation_angles: u.Quantity,
+        wavelengths: u.Quantity,
+        sky_positions: u.Quantity,
+    ) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
+        """Calculate point-source transmission of the LIFE double Bracewell.
+
+        The two chopped outputs use the LIFEsimFT beam-combiner phases.
+        Transmission is normalized to the total collecting area of the
+        four telescopes, without throughput or photon-rate factors.
+
+        Args:
+            nulling_baseline (astropy.units.Quantity):
+                Nulling baseline with length units.
+            rotation_angles (astropy.units.Quantity):
+                Scalar or 1D array of array-rotation angles.
+            wavelengths (astropy.units.Quantity):
+                Scalar or 1D array of wavelengths with length units.
+            sky_positions (astropy.units.Quantity):
+                Angular offsets (theta_x, theta_y), shape (2,) or (n_sky, 2).
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity, astropy.units.Quantity]:
+                Left, right, and left-minus-right transmission, dimensionless.
+                Each has shape (n_rotations, n_sky, n_wavelengths).
+
+        Raises:
+            TypeError:
+                If wavelengths or sky_positions are not Astropy Quantities.
+            ValueError:
+                If wavelengths or sky positions have invalid units or values.
+        """
+        if not isinstance(wavelengths, u.Quantity):
+            raise TypeError("wavelengths must be an Astropy Quantity.")
+        if not isinstance(sky_positions, u.Quantity):
+            raise TypeError("sky_positions must be an Astropy Quantity.")
+
+        try:
+            wavelength_m = np.atleast_1d(wavelengths.to_value(u.m))
+        except u.UnitConversionError as exc:
+            raise ValueError("wavelengths must have length units.") from exc
+
+        if (
+            wavelength_m.ndim != 1
+            or wavelength_m.size == 0
+            or not np.all(np.isfinite(wavelength_m))
+            or np.any(wavelength_m <= 0)
+        ):
+            raise ValueError("wavelengths must be finite, positive, and 1D.")
+
+        try:
+            theta = np.asarray(sky_positions.to_value(u.rad))
+        except u.UnitConversionError as exc:
+            raise ValueError("sky_positions must have angular units.") from exc
+
+        if theta.ndim == 1:
+            theta = theta[np.newaxis, :]
+
+        if (
+            theta.ndim != 2
+            or theta.shape[1] != 2
+            or theta.shape[0] == 0
+            or not np.all(np.isfinite(theta))
+        ):
+            raise ValueError("sky_positions must have shape (2,) or (n_sky, 2).")
+
+        baselines_m = self.get_baselines(
+            nulling_baseline, rotation_angles
+        ).to_value(u.m)
+        if baselines_m.shape[0] == 0:
+            raise ValueError("At least one rotation angle is required.")
+
+        # A common optical phase does not affect intensity. Use collector 0
+        # as the reference and avoid explicitly summing all 16 pairs.
+        relative_positions = baselines_m[:, :, 0, :]
+        delays_m = np.einsum("rjc,sc->rsj", relative_positions, theta)
+        geometric_phase = (
+            2.0 * np.pi * delays_m[:, :, None, :]
+            / wavelength_m[None, None, :, None]
+        )
+
+        phase_left = np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2])
+        phase_right = np.array([0.0, 3 * np.pi / 2, np.pi, np.pi / 2])
+
+        field_left = np.exp(1j * (geometric_phase + phase_left)).sum(axis=-1)
+        field_right = np.exp(1j * (geometric_phase + phase_right)).sum(axis=-1)
+
+        # Division by 4**2 gives transmission relative to four collectors.
+        left = np.abs(field_left) ** 2 / 16.0
+        right = np.abs(field_right) ** 2 / 16.0
+
+        unit = u.dimensionless_unscaled
+        return left * unit, right * unit, (left - right) * unit
+
 
     # ================================================================
     # Stage 3 — Photon rates
