@@ -275,7 +275,8 @@ class LIFEOpticalSystem(OpticalSystem):
     ) -> tuple[u.Quantity, u.Quantity]:
         """Calculate LIFE wavelength bins at constant nominal resolution.
 
-        Uses the same geometric binning convention as LIFEsimFT.
+        Wavelength bins are geometrically spaced to maintain constant
+        nominal resolving power R = lambda / delta_lambda.
         The final bin may extend beyond wavelength_max.
 
         Args:
@@ -323,7 +324,7 @@ class LIFEOpticalSystem(OpticalSystem):
         if not np.isfinite(resolving_power) or resolving_power <= 0:
             raise ValueError("resolving_power must be finite and positive.")
 
-        # Geometric wavelength bins, matching LIFEsimFT.
+        # Geometric wavelength bins with constant nominal resolving power.
         step = 1.0 + 1.0 / resolving_power
 
         n_bins = int(
@@ -405,7 +406,8 @@ class LIFEOpticalSystem(OpticalSystem):
     ) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
         """Calculate point-source transmission of the LIFE double Bracewell.
 
-        The two chopped outputs use the LIFEsimFT beam-combiner phases.
+        The two chopped outputs use the quadrature phase shifts of the
+        double Bracewell beam combiner.
         Transmission is normalized to the total collecting area of the
         four telescopes, without throughput or photon-rate factors.
 

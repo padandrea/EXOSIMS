@@ -108,7 +108,7 @@ def test_get_baselines_rotation():
     )
 
 def test_get_spectral_bins_reference():
-    """Verify LIFE spectral bins against the LIFEsimFT convention."""
+    """Verify geometric spectral binning at constant resolving power."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
 
     centers, widths = life.get_spectral_bins(
@@ -164,8 +164,8 @@ def test_transmission_shape_and_on_axis_null():
         np.testing.assert_allclose(transmission.value, 0.0, atol=1e-14)
 
 
-def test_transmission_matches_lifesimft_pair_sum():
-    """Compare the point-source response with LIFEsimFT's Fourier pair sum."""
+def test_transmission_matches_fourier_pair_sum():
+    """Verify agreement between field summation and the Fourier pair sum."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
     life.baseline_ratio = 6.0
 
@@ -259,3 +259,75 @@ def test_transmission_rejects_invalid_inputs():
         life.get_transmission(
             14.5 * u.m, 0 * u.rad, 10.0 * u.um, [0, 0] * u.m
         )
+
+
+def test_transmission_energy_conservation():
+    """Verify transmission normalization using a unitary beam combiner."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+    life.baseline_ratio = 6.0
+
+    rotations = np.array([0.0, 0.7, 1.8]) * u.rad
+    sky = np.array([4.848e-7, 1.0e-7]) * u.rad
+    wavelength = 10.0 * u.um
+
+    left, right, _ = life.get_transmission(
+        14.5 * u.m, rotations, wavelength, sky
+    )
+
+    # Four-output double-Bracewell combiner.
+    # Columns follow the collector ordering in get_collector_positions().
+    combiner = 0.5 * np.array(
+        [
+            [0, np.sqrt(2), 0, np.sqrt(2)],
+            [np.sqrt(2), 0, np.sqrt(2), 0],
+            [1, 1j, -1, -1j],
+            [1, -1j, -1, 1j],
+        ],
+        dtype=complex,
+    )
+
+    # A lossless beam-combiner matrix must be unitary.
+    np.testing.assert_allclose(
+        combiner.conj().T @ combiner,
+        np.eye(4),
+        atol=1e-14,
+    )
+
+    baselines = life.get_baselines(
+        14.5 * u.m, rotations
+    ).to_value(u.m)
+
+    relative_positions = baselines[:, :, 0, :]
+    geometric_phase = (
+        2 * np.pi / wavelength.to_value(u.m)
+        * np.einsum(
+            "rjc,c->rj",
+            relative_positions,
+            sky.to_value(u.rad),
+        )
+    )
+
+    input_fields = np.exp(1j * geometric_phase)
+    output_fields = input_fields @ combiner.T
+
+    # Normalize output intensities by four telescope inputs.
+    transmissions = np.abs(output_fields) ** 2 / 4.0
+
+    # All collected light must be accounted for.
+    np.testing.assert_allclose(
+        transmissions.sum(axis=1),
+        1.0,
+        atol=1e-14,
+    )
+
+    # The two nulled outputs must match get_transmission().
+    np.testing.assert_allclose(
+        transmissions[:, 2],
+        left[:, 0, 0].value,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        transmissions[:, 3],
+        right[:, 0, 0].value,
+        atol=1e-14,
+    )
