@@ -34,6 +34,18 @@ def reference_collector_positions(rotation_angles):
 
     return rotated * u.m
 
+def test_total_collecting_area():
+    """Verify the combined area of four equal collectors."""
+    life = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+    )
+
+    # Each 2 m collector has an area of pi m².
+    # Four collectors therefore have an area of 4*pi m².
+    assert life.total_collecting_area.to_value(u.m**2) == pytest.approx(
+        4.0 * np.pi
+    )
 
 def test_mid_ir_observing_mode():
     """Verify that LIFE supports a 15 um observing mode."""
@@ -75,9 +87,13 @@ def test_get_spectral_bins_reference():
         atol=1e-12,
     )
 
-    # The final bin covers the upper wavelength limit.
+    # The final bin ends exactly at the upper wavelength limit.
     assert lower_edges[-1] < 18.5 * u.um
-    assert upper_edges[-1] >= 18.5 * u.um
+    np.testing.assert_allclose(
+        upper_edges[-1].to_value(u.um),
+        18.5,
+        atol=1e-12,
+    )
 
     # Check the geometric spacing.
     ratios = lower_edges[1:] / lower_edges[:-1]
@@ -90,6 +106,36 @@ def test_get_spectral_bins_reference():
 
     assert np.all(widths > 0 * u.m)
 
+def test_get_spectral_bins_from_mode():
+    """Verify that spectral bins use observing-mode parameters."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    mode = {
+        "lam": 11.25 * u.um,
+        "deltaLam": 14.5 * u.um,
+        "inst": {
+            "name": "LIFE-spectrometer",
+            "Rs": 33.3,
+        },
+    }
+
+    centers, widths = life.get_spectral_bins_from_mode(mode)
+
+    expected_centers, expected_widths = life.get_spectral_bins(
+        4.0 * u.um,
+        18.5 * u.um,
+        33.3,
+    )
+
+    np.testing.assert_allclose(
+        centers.to_value(u.um),
+        expected_centers.to_value(u.um),
+    )
+
+    np.testing.assert_allclose(
+        widths.to_value(u.um),
+        expected_widths.to_value(u.um),
+    )
 
 def test_transmission_shape_and_on_axis_null():
     """Both nulled outputs vanish for an on-axis point source."""

@@ -16,6 +16,11 @@ class LIFEOpticalSystem(OpticalSystem):
             EXOSIMS OpticalSystem configuration parameters.
     """
 
+    @property
+    def total_collecting_area(self) -> u.Quantity:
+        """Return the combined collecting area of four LIFE collectors."""
+        return 4.0 * self.pupilArea
+
     # ================================================================
     # Stage 0 — Initialization
     # ================================================================
@@ -211,7 +216,7 @@ class LIFEOpticalSystem(OpticalSystem):
 
         Wavelength bins are geometrically spaced to maintain constant
         nominal resolving power R = lambda / delta_lambda.
-        The final bin may extend beyond wavelength_max.
+        The final bin is truncated at wavelength_max.
 
         Args:
             wavelength_min (astropy.units.Quantity):
@@ -266,11 +271,27 @@ class LIFEOpticalSystem(OpticalSystem):
         )
 
         edges = lam_min * step ** np.arange(n_bins + 1)
+        edges[-1] = lam_max
 
         centers = (edges[:-1] + edges[1:]) / 2
         widths = edges[1:] - edges[:-1]
 
         return centers * u.m, widths * u.m
+
+    def get_spectral_bins_from_mode(
+        self, mode: dict
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Calculate wavelength bins from an EXOSIMS observing mode."""
+        if "spec" not in mode["inst"]["name"].lower():
+            raise ValueError("Spectral binning requires a spectrometer.")
+
+        half_width = mode["deltaLam"] / 2
+
+        return self.get_spectral_bins(
+            mode["lam"] - half_width,
+            mode["lam"] + half_width,
+            mode["inst"]["Rs"],
+        )
 
     # ================================================================
     # Stage 2 — Interferometry
