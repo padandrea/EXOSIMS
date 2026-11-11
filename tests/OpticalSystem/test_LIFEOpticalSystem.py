@@ -9,6 +9,31 @@ import pytest
 from EXOSIMS.OpticalSystem.LIFEOpticalSystem import LIFEOpticalSystem
 from tests.TestSupport.Info import resource_path
 
+def reference_collector_positions(rotation_angles):
+    """Generate reference X-array coordinates for transmission tests."""
+    angles = np.atleast_1d(rotation_angles.to_value(u.rad))
+
+    # Reference geometry: 14.5 m nulling baseline, ratio 6.
+    positions = np.array([
+        [-7.25, -43.5],
+        [-7.25, 43.5],
+        [7.25, -43.5],
+        [7.25, 43.5],
+    ])
+
+    x = positions[:, 0]
+    y = positions[:, 1]
+
+    cos_a = np.cos(angles)[:, None]
+    sin_a = np.sin(angles)[:, None]
+
+    rotated = np.stack([
+        x * cos_a - y * sin_a,
+        x * sin_a + y * cos_a,
+    ], axis=-1)
+
+    return rotated * u.m
+
 
 def test_mid_ir_observing_mode():
     """Verify that LIFE supports a 15 um observing mode."""
@@ -24,88 +49,8 @@ def test_mid_ir_observing_mode():
     assert optical_system.observingModes[0]["lam"].to_value(u.um) == pytest.approx(15.0)
 
 
-@pytest.mark.parametrize(
-    ("configured_ratio", "expected_ratio"),
-    [
-        (None, 6.0),
-        (8.0, 8.0),
-    ],
-)
-def test_baseline_ratio_configuration(configured_ratio, expected_ratio):
-    """Verify the default ratio and configuration overrides."""
-    path = resource_path("test-scripts/template_minimal.json")
-
-    with open(path, encoding="utf-8") as file:
-        specs = json.load(file)
-
-    if configured_ratio is not None:
-        specs["baseline_ratio"] = configured_ratio
-
-    optical_system = LIFEOpticalSystem(**specs)
-
-    assert optical_system.baseline_ratio == expected_ratio
-    assert optical_system._outspec["baseline_ratio"] == expected_ratio
 
 
-@pytest.mark.parametrize(
-    "invalid_ratio",
-    [0.0, -1.0, float("nan"), float("inf")],
-)
-def test_invalid_baseline_ratio(invalid_ratio):
-    """Reject nonpositive and nonfinite baseline ratios."""
-    with pytest.raises(ValueError, match="baseline_ratio"):
-        LIFEOpticalSystem(baseline_ratio=invalid_ratio)
-
-def test_get_collector_positions_reference():
-    """Verify the LIFE reference X-array geometry."""
-    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
-
-    positions = life.get_collector_positions(14.5 * u.m)
-
-    expected = np.array(
-        [
-            [-7.25, -43.5],
-            [-7.25, 43.5],
-            [7.25, -43.5],
-            [7.25, 43.5],
-        ]
-    ) * u.m
-
-    np.testing.assert_allclose(
-        positions.to_value(u.m),
-        expected.to_value(u.m),
-    )
-
-def test_get_baselines_rotation():
-    """Verify pairwise baselines and 90-degree array rotation."""
-    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
-
-    baselines = life.get_baselines(
-        14.5 * u.m,
-        np.array([0, 90]) * u.deg,
-    )
-
-    assert baselines.shape == (2, 4, 4, 2)
-
-    np.testing.assert_allclose(
-        baselines[0, 0, 2].to_value(u.m),
-        [-14.5, 0.0],
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        baselines[1, 0, 2].to_value(u.m),
-        [0.0, -14.5],
-        atol=1e-12,
-    )
-
-    np.testing.assert_allclose(
-        baselines[0].to_value(u.m),
-        -np.swapaxes(baselines[0].to_value(u.m), 0, 1),
-        atol=1e-12,
-    )
 
 def test_get_spectral_bins_reference():
     """Verify geometric spectral binning at constant resolving power."""
@@ -149,11 +94,15 @@ def test_get_spectral_bins_reference():
 def test_transmission_shape_and_on_axis_null():
     """Both nulled outputs vanish for an on-axis point source."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
+
+
+    # Temporary geometry input until LIFEObservatory exists.
+    positions = reference_collector_positions(
+        np.array([0.0, 90.0]) * u.deg
+    )
 
     left, right, chopped = life.get_transmission(
-        14.5 * u.m,
-        np.array([0.0, 90.0]) * u.deg,
+        positions,
         np.array([10.0, 12.0]) * u.um,
         np.array([0.0, 0.0]) * u.mas,
     )
@@ -167,16 +116,23 @@ def test_transmission_shape_and_on_axis_null():
 def test_transmission_matches_fourier_pair_sum():
     """Verify agreement between field summation and the Fourier pair sum."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
+
 
     rotations = np.array([0.0, 0.3, 1.1]) * u.rad
     sky = np.array([4.848e-7, 1.0e-7]) * u.rad
     wavelength = 10.0 * u.um
+    positions = reference_collector_positions(rotations)
+
     left, right, chopped = life.get_transmission(
-        14.5 * u.m, rotations, wavelength, sky
+        positions, wavelength, sky
     )
 
-    baselines = life.get_baselines(14.5 * u.m, rotations).to_value(u.m)
+    # Calculate pairwise baseline vectors from the supplied positions.
+    positions_m = positions.to_value(u.m)
+    baselines = (
+        positions_m[:, :, None, :]
+        - positions_m[:, None, :, :]
+    )
     visibility = np.exp(
         1j
         * (2.0 * np.pi / wavelength.to_value(u.m))
@@ -202,12 +158,14 @@ def test_transmission_matches_fourier_pair_sum():
 def test_transmission_mirror_symmetry_and_odd_chop():
     """The right output mirrors the left; the chopped response is odd."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
+
 
     sky = np.array([[4.848e-7, 0.0], [-4.848e-7, 0.0]]) * u.rad
     rotations = np.linspace(0.0, 2.0 * np.pi, 13, endpoint=False) * u.rad
+    positions = reference_collector_positions(rotations)
+
     left, right, chopped = life.get_transmission(
-        14.5 * u.m, rotations, 10.0 * u.um, sky
+        positions, 10.0 * u.um, sky
     )
 
     np.testing.assert_allclose(left[:, 0, :].value, right[:, 1, :].value, atol=1e-14)
@@ -220,62 +178,113 @@ def test_transmission_mirror_symmetry_and_odd_chop():
     assert np.all(right.value <= 1.0 + 1e-14)
 
 
-def test_transmission_changes_with_baseline_ratio():
-    """A different imaging/nulling ratio changes the spatial response."""
+def test_transmission_changes_with_collector_geometry():
+    """Verify that different array geometries change transmission."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
     sky = np.array([4.848e-7, 1.0e-7]) * u.rad
 
-    life.baseline_ratio = 6.0
+    # X-array with baseline ratio 6.
+    positions_6 = np.array(
+        [
+            [-7.25, -43.5],
+            [-7.25, 43.5],
+            [7.25, -43.5],
+            [7.25, 43.5],
+        ]
+    ) * u.m
+
+    # X-array with baseline ratio 8.
+    positions_8 = np.array(
+        [
+            [-7.25, -58.0],
+            [-7.25, 58.0],
+            [7.25, -58.0],
+            [7.25, 58.0],
+        ]
+    ) * u.m
+
     left_6, _, _ = life.get_transmission(
-        14.5 * u.m, 0.0 * u.rad, 10.0 * u.um, sky
-    )
-    life.baseline_ratio = 8.0
-    left_8, _, _ = life.get_transmission(
-        14.5 * u.m, 0.0 * u.rad, 10.0 * u.um, sky
+        positions_6, 10.0 * u.um, sky
     )
 
-    assert not np.isclose(left_6.value[0, 0, 0], left_8.value[0, 0, 0])
+    left_8, _, _ = life.get_transmission(
+        positions_8, 10.0 * u.um, sky
+    )
+
+    assert not np.isclose(
+        left_6.value[0, 0, 0],
+        left_8.value[0, 0, 0],
+    )
 
 
 def test_transmission_rejects_invalid_inputs():
-    """Require valid Astropy wavelengths and angular sky coordinates."""
+    """Require valid collector positions, wavelengths, and sky coordinates."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
 
-    with pytest.raises(TypeError, match="wavelengths"):
-        life.get_transmission(14.5 * u.m, 0 * u.rad, 10.0, [0, 0] * u.rad)
+    positions = np.array(
+        [
+            [-7.25, -43.5],
+            [-7.25, 43.5],
+            [7.25, -43.5],
+            [7.25, 43.5],
+        ]
+    ) * u.m
 
-    with pytest.raises(ValueError, match="wavelengths"):
+    wavelength = 10.0 * u.um
+    sky = np.array([0.0, 0.0]) * u.rad
+
+    # Collector positions must have valid units and shape.
+    with pytest.raises(TypeError, match="collector_positions"):
+        life.get_transmission(positions.value, wavelength, sky)
+
+    with pytest.raises(ValueError, match="length units"):
+        life.get_transmission(positions.value * u.rad, wavelength, sky)
+
+    with pytest.raises(ValueError, match="collector_positions"):
+        life.get_transmission(np.zeros((3, 2)) * u.m, wavelength, sky)
+
+    with pytest.raises(ValueError, match="collector_positions"):
         life.get_transmission(
-            14.5 * u.m, 0 * u.rad, -10.0 * u.um, [0, 0] * u.rad
+            np.full((4, 2), np.nan) * u.m, wavelength, sky
         )
 
+    # Wavelengths must be positive physical quantities.
+    with pytest.raises(TypeError, match="wavelengths"):
+        life.get_transmission(positions, 10.0, sky)
+
+    with pytest.raises(ValueError, match="wavelengths"):
+        life.get_transmission(positions, -10.0 * u.um, sky)
+
+    # Sky coordinates must have angular units and the correct shape.
     with pytest.raises(ValueError, match="sky_positions"):
         life.get_transmission(
-            14.5 * u.m, 0 * u.rad, 10.0 * u.um, [0, 0, 0] * u.rad
+            positions, wavelength, np.array([0, 0, 0]) * u.rad
         )
 
     with pytest.raises(ValueError, match="angular units"):
         life.get_transmission(
-            14.5 * u.m, 0 * u.rad, 10.0 * u.um, [0, 0] * u.m
+            positions, wavelength, np.array([0, 0]) * u.m
         )
 
 
 def test_transmission_energy_conservation():
     """Verify transmission normalization using a unitary beam combiner."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
-    life.baseline_ratio = 6.0
+
 
     rotations = np.array([0.0, 0.7, 1.8]) * u.rad
     sky = np.array([4.848e-7, 1.0e-7]) * u.rad
     wavelength = 10.0 * u.um
 
+    positions = reference_collector_positions(rotations)
+
     left, right, _ = life.get_transmission(
-        14.5 * u.m, rotations, wavelength, sky
+        positions, wavelength, sky
     )
 
     # Four-output double-Bracewell combiner.
-    # Columns follow the collector ordering in get_collector_positions().
+    # Columns follow the ordering in reference_collector_positions().
     combiner = 0.5 * np.array(
         [
             [0, np.sqrt(2), 0, np.sqrt(2)],
@@ -293,11 +302,10 @@ def test_transmission_energy_conservation():
         atol=1e-14,
     )
 
-    baselines = life.get_baselines(
-        14.5 * u.m, rotations
-    ).to_value(u.m)
+    positions_m = positions.to_value(u.m)
 
-    relative_positions = baselines[:, :, 0, :]
+    # Use collector 0 as the reference for optical phase.
+    relative_positions = positions_m - positions_m[:, :1, :]
     geometric_phase = (
         2 * np.pi / wavelength.to_value(u.m)
         * np.einsum(

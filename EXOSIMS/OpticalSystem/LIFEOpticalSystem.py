@@ -12,14 +12,8 @@ class LIFEOpticalSystem(OpticalSystem):
     """LIFE mid-infrared nulling interferometer optical system.
 
     Args:
-        baseline_ratio (float):
-            Imaging-to-nulling baseline ratio. Defaults to 6.0.
         **specs (dict):
-            Additional EXOSIMS OpticalSystem configuration parameters.
-
-    Attributes:
-        baseline_ratio (float):
-            Ratio of imaging baseline to nulling baseline.
+            EXOSIMS OpticalSystem configuration parameters.
     """
 
     # ================================================================
@@ -27,18 +21,6 @@ class LIFEOpticalSystem(OpticalSystem):
     # ================================================================
     # Configure the LIFE instrument and initialize EXOSIMS interfaces.
 
-
-    def __init__(self, baseline_ratio=6.0, **specs):
-        """Initialize the LIFE optical system."""
-        baseline_ratio = float(baseline_ratio)
-
-        if not np.isfinite(baseline_ratio) or baseline_ratio <= 0:
-            raise ValueError("baseline_ratio must be finite and positive.")
-
-        super().__init__(**specs)
-
-        self.baseline_ratio = baseline_ratio
-        self._outspec["baseline_ratio"] = baseline_ratio
 
     def populate_observingModes(self, observingModes):
         """Helper method to parse input observingMode dictionaries and assign default
@@ -210,58 +192,10 @@ class LIFEOpticalSystem(OpticalSystem):
 
 
     # ================================================================
-    # Stage 1 — Geometry and spectrum
+    # Stage 1 —  Spectral configuration
     # ================================================================
 
-    # ----------------------------------------------------------------
-    # Array geometry
-    # ----------------------------------------------------------------
 
-    def get_collector_positions(self, nulling_baseline: u.Quantity) -> u.Quantity:
-        """Calculate the four collector positions of the LIFE X-array.
-
-        The array is centered at the origin. The imaging baseline is
-        calculated from the nulling baseline and baseline_ratio.
-
-        Args:
-            nulling_baseline (astropy.units.Quantity):
-                Nulling baseline with physical length units.
-
-        Returns:
-            astropy.units.Quantity:
-                Collector positions with shape (4, 2), in metres.
-                Each row contains the (x, y) coordinates of a collector.
-
-        Raises:
-            TypeError:
-                If nulling_baseline is not an Astropy Quantity.
-            ValueError:
-                If the baseline is not a positive finite scalar length.
-        """
-        if not isinstance(nulling_baseline, u.Quantity):
-            raise TypeError("nulling_baseline must be an Astropy Quantity.")
-
-        try:
-            b_null = nulling_baseline.to_value(u.m)
-        except u.UnitConversionError as exc:
-            raise ValueError("nulling_baseline must have length units.") from exc
-
-        if np.ndim(b_null) != 0 or not np.isfinite(b_null) or b_null <= 0:
-            raise ValueError("nulling_baseline must be finite and positive.")
-
-        b_img = self.baseline_ratio * b_null
-
-        positions = np.array(
-            [
-                [-b_null / 2, -b_img / 2],
-                [-b_null / 2, +b_img / 2],
-                [+b_null / 2, -b_img / 2],
-                [+b_null / 2, +b_img / 2],
-            ],
-            dtype=float,
-        )
-
-        return positions * u.m
 
     # ----------------------------------------------------------------
     # Spectral configuration
@@ -338,69 +272,13 @@ class LIFEOpticalSystem(OpticalSystem):
 
         return centers * u.m, widths * u.m
 
-    # ----------------------------------------------------------------
-    # Baseline geometry and rotation
-    # ----------------------------------------------------------------
-
-    def get_baselines(
-        self,
-        nulling_baseline: u.Quantity,
-        rotation_angles: u.Quantity,
-    ) -> u.Quantity:
-        """Calculate pairwise baseline vectors for the rotating LIFE array.
-
-        Args:
-            nulling_baseline (astropy.units.Quantity):
-                Nulling baseline with length units.
-            rotation_angles (astropy.units.Quantity):
-                Scalar or 1D array of rotation angles.
-
-        Returns:
-            astropy.units.Quantity:
-                Baseline vectors with shape (n_rotations, 4, 4, 2),
-                in metres. Entry [a, j, k] is r_j - r_k.
-        """
-        if not isinstance(rotation_angles, u.Quantity):
-            raise TypeError("rotation_angles must be an Astropy Quantity.")
-
-        angles = np.atleast_1d(rotation_angles.to_value(u.rad))
-
-        if angles.ndim != 1 or not np.all(np.isfinite(angles)):
-            raise ValueError("rotation_angles must be finite and 1D.")
-
-        positions = self.get_collector_positions(
-            nulling_baseline
-        ).to_value(u.m)
-
-        x = positions[None, :, 0]
-        y = positions[None, :, 1]
-
-        cos_a = np.cos(angles)[:, None]
-        sin_a = np.sin(angles)[:, None]
-
-        rotated = np.stack(
-            [
-                x * cos_a - y * sin_a,
-                x * sin_a + y * cos_a,
-            ],
-            axis=-1,
-        )
-
-        baselines = (
-            rotated[:, :, None, :] - rotated[:, None, :, :]
-        )
-
-        return baselines * u.m
-
-
     # ================================================================
     # Stage 2 — Interferometry
     # ================================================================
 
     def get_transmission(
         self,
-        nulling_baseline: u.Quantity,
-        rotation_angles: u.Quantity,
+        collector_positions: u.Quantity,
         wavelengths: u.Quantity,
         sky_positions: u.Quantity,
     ) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
@@ -412,10 +290,11 @@ class LIFEOpticalSystem(OpticalSystem):
         four telescopes, without throughput or photon-rate factors.
 
         Args:
-            nulling_baseline (astropy.units.Quantity):
-                Nulling baseline with length units.
-            rotation_angles (astropy.units.Quantity):
-                Scalar or 1D array of array-rotation angles.
+            collector_positions (astropy.units.Quantity):
+                Collector coordinates with shape (4, 2) or
+                (n_configurations, 4, 2), in length units.
+                Collector ordering must match the beam combiner.
+                Coordinates use the same sky axes as sky_positions.
             wavelengths (astropy.units.Quantity):
                 Scalar or 1D array of wavelengths with length units.
             sky_positions (astropy.units.Quantity):
@@ -424,13 +303,13 @@ class LIFEOpticalSystem(OpticalSystem):
         Returns:
             tuple[astropy.units.Quantity, astropy.units.Quantity, astropy.units.Quantity]:
                 Left, right, and left-minus-right transmission, dimensionless.
-                Each has shape (n_rotations, n_sky, n_wavelengths).
+                Each has shape (n_configurations, n_sky, n_wavelengths).
 
         Raises:
             TypeError:
-                If wavelengths or sky_positions are not Astropy Quantities.
+                If an input is not an Astropy Quantity.
             ValueError:
-                If wavelengths or sky positions have invalid units or values.
+                If input units, shapes, or values are invalid.
         """
         if not isinstance(wavelengths, u.Quantity):
             raise TypeError("wavelengths must be an Astropy Quantity.")
@@ -466,15 +345,32 @@ class LIFEOpticalSystem(OpticalSystem):
         ):
             raise ValueError("sky_positions must have shape (2,) or (n_sky, 2).")
 
-        baselines_m = self.get_baselines(
-            nulling_baseline, rotation_angles
-        ).to_value(u.m)
-        if baselines_m.shape[0] == 0:
-            raise ValueError("At least one rotation angle is required.")
+        if not isinstance(collector_positions, u.Quantity):
+            raise TypeError("collector_positions must be an Astropy Quantity.")
 
-        # A common optical phase does not affect intensity. Use collector 0
-        # as the reference and avoid explicitly summing all 16 pairs.
-        relative_positions = baselines_m[:, :, 0, :]
+        try:
+            positions_m = np.asarray(collector_positions.to_value(u.m))
+        except u.UnitConversionError as exc:
+            raise ValueError(
+                "collector_positions must have length units."
+            ) from exc
+
+        if positions_m.ndim == 2:
+            positions_m = positions_m[np.newaxis, :, :]
+
+        if (
+            positions_m.ndim != 3
+            or positions_m.shape[0] == 0
+            or positions_m.shape[1:] != (4, 2)
+            or not np.all(np.isfinite(positions_m))
+        ):
+            raise ValueError(
+                "collector_positions must have shape (4, 2) "
+                "or (n_configurations, 4, 2), with finite values."
+            )
+
+        # Remove the common optical phase using collector 0 as reference.
+        relative_positions = positions_m - positions_m[:, :1, :]
         delays_m = np.einsum("rjc,sc->rsj", relative_positions, theta)
         geometric_phase = (
             2.0 * np.pi * delays_m[:, :, None, :]
