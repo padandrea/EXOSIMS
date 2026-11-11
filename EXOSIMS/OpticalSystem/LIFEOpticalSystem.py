@@ -2,6 +2,7 @@
 
 import astropy.units as u
 import numpy as np
+from scipy.special import j1
 from synphot import Observation, SpectralElement
 from synphot.models import Box1D, Gaussian1D
 
@@ -491,6 +492,254 @@ class LIFEOpticalSystem(OpticalSystem):
             (left * incident_rate).to(1 / u.s),
             (right * incident_rate).to(1 / u.s),
         )
+
+
+    def get_stellar_leakage_rates(
+        self,
+        collector_positions: u.Quantity,
+        wavelengths: u.Quantity,
+        bin_widths: u.Quantity,
+        stellar_angular_radius: u.Quantity,
+        stellar_spectral_flux: u.Quantity,
+        mode: dict,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Calculate stellar leakage rates for a uniform stellar disk.
+
+        The star is centered on the optical axis and has uniform surface
+        brightness. Disk-averaged transmission is evaluated analytically
+        using the uniform-disk visibility function.
+
+        Args:
+            collector_positions (astropy.units.Quantity):
+                Collector coordinates, shape (4, 2) or
+                (n_configurations, 4, 2).
+            wavelengths (astropy.units.Quantity):
+                Wavelength-bin centers.
+            bin_widths (astropy.units.Quantity):
+                Widths of the spectral bins.
+            stellar_angular_radius (astropy.units.Quantity):
+                Apparent stellar angular radius.
+            stellar_spectral_flux (astropy.units.Quantity):
+                Total stellar photon flux density at the observer,
+                in ph / (s m2 um), one value per wavelength bin.
+            mode (dict):
+                EXOSIMS observing mode.
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity]:
+                Leakage count rates in the left and right outputs,
+                in 1/s, shape (n_configurations, n_wavelengths).
+        """
+        quantities = (
+            collector_positions,
+            wavelengths,
+            bin_widths,
+            stellar_angular_radius,
+            stellar_spectral_flux,
+        )
+        if not all(isinstance(q, u.Quantity) for q in quantities):
+            raise TypeError("All physical inputs must be Astropy Quantities.")
+
+        positions = np.asarray(collector_positions.to_value(u.m))
+        if positions.ndim == 2:
+            positions = positions[np.newaxis, :, :]
+
+        if (
+            positions.ndim != 3
+            or positions.shape[0] == 0
+            or positions.shape[1:] != (4, 2)
+            or not np.all(np.isfinite(positions))
+        ):
+            raise ValueError("Invalid collector_positions shape or values.")
+
+        lam = np.atleast_1d(wavelengths.to_value(u.m))
+        widths = np.atleast_1d(bin_widths.to(u.um))
+        flux = np.atleast_1d(
+            stellar_spectral_flux.to(
+                u.photon / (u.s * u.m**2 * u.um)
+            )
+        )
+        radius = np.asarray(stellar_angular_radius.to_value(u.rad))
+
+        if (
+            lam.ndim != 1
+            or lam.size == 0
+            or not np.all(np.isfinite(lam))
+            or np.any(lam <= 0)
+            or widths.shape != lam.shape
+            or flux.shape != lam.shape
+            or not np.all(np.isfinite(widths.value))
+            or not np.all(np.isfinite(flux.value))
+            or np.any(widths.value <= 0)
+            or np.any(flux.value < 0)
+        ):
+            raise ValueError("Invalid spectral inputs.")
+
+        if radius.ndim != 0 or not np.isfinite(radius) or radius < 0:
+            raise ValueError("stellar_angular_radius must be nonnegative.")
+
+        # Pairwise projected collector separations.
+        baselines = (
+            positions[:, :, None, :]
+            - positions[:, None, :, :]
+        )
+        baseline_lengths = np.linalg.norm(baselines, axis=-1)
+
+        # Uniform-disk coherence: 2*J1(x)/x, with limit 1 at x=0.
+        x = (
+            2.0 * np.pi * radius
+            * baseline_lengths[:, None, :, :]
+            / lam[None, :, None, None]
+        )
+
+        coherence = np.ones_like(x)
+        np.divide(
+            2.0 * j1(x),
+            x,
+            out=coherence,
+            where=x != 0,
+        )
+
+        # Same beam-combiner phases as get_transmission().
+        phase_left = np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2])
+        phase_right = np.array([0.0, 3 * np.pi / 2, np.pi, np.pi / 2])
+
+        weights_left = np.cos(
+            phase_left[:, None] - phase_left[None, :]
+        )
+        weights_right = np.cos(
+            phase_right[:, None] - phase_right[None, :]
+        )
+
+        transmission_left = np.einsum(
+            "ij,cwij->cw", weights_left, coherence
+        ) / 16.0
+        transmission_right = np.einsum(
+            "ij,cwij->cw", weights_right, coherence
+        ) / 16.0
+
+        # Remove possible negative values from floating-point roundoff.
+        transmission_left = np.maximum(transmission_left, 0.0)
+        transmission_right = np.maximum(transmission_right, 0.0)
+
+        qe = mode["inst"]["QE"](np.atleast_1d(wavelengths))
+
+        incident_rate = (
+            flux
+            * widths
+            * self.total_collecting_area
+            * mode["attenuation"]
+            * qe
+        ).to(1 / u.s)
+
+        return (
+            (transmission_left * incident_rate).to(1 / u.s),
+            (transmission_right * incident_rate).to(1 / u.s),
+        )
+
+    def get_extended_background_rates(
+        self,
+        collector_positions: u.Quantity,
+        wavelengths: u.Quantity,
+        bin_widths: u.Quantity,
+        sky_positions: u.Quantity,
+        spectral_radiance: u.Quantity,
+        pixel_solid_angles: u.Quantity,
+        mode: dict,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Calculate photon rates from a spatially extended background.
+
+        Args:
+            collector_positions (astropy.units.Quantity):
+                Collector coordinates in length units.
+            wavelengths (astropy.units.Quantity):
+                Wavelength-bin centers.
+            bin_widths (astropy.units.Quantity):
+                Width of each spectral bin.
+            sky_positions (astropy.units.Quantity):
+                Angular coordinates of sky pixels, shape (n_sky, 2).
+            spectral_radiance (astropy.units.Quantity):
+                Background photon radiance, shape (n_sky, n_wavelengths),
+                in ph / (s m2 um sr).
+            pixel_solid_angles (astropy.units.Quantity):
+                Solid angle of each sky pixel, shape (n_sky,).
+            mode (dict):
+                EXOSIMS observing mode.
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity]:
+                Left and right background count rates in 1/s,
+                shape (n_configurations, n_wavelengths).
+        """
+        left, right, _ = self.get_transmission(
+            collector_positions, wavelengths, sky_positions
+        )
+
+        n_sky = left.shape[1]
+        n_wavelengths = left.shape[2]
+
+        radiance = spectral_radiance.to(
+            u.photon / (u.s * u.m**2 * u.um * u.sr)
+        )
+        solid_angles = np.atleast_1d(
+            pixel_solid_angles.to(u.sr)
+        )
+        widths = np.atleast_1d(bin_widths.to(u.um))
+
+        if radiance.shape != (n_sky, n_wavelengths):
+            raise ValueError(
+                "spectral_radiance must have shape "
+                "(n_sky, n_wavelengths)."
+            )
+
+        if solid_angles.shape != (n_sky,):
+            raise ValueError(
+                "pixel_solid_angles must have shape (n_sky,)."
+            )
+
+        if widths.shape != (n_wavelengths,):
+            raise ValueError(
+                "bin_widths must have one value per wavelength."
+            )
+
+        if (
+            not np.all(np.isfinite(radiance.value))
+            or np.any(radiance.value < 0)
+            or not np.all(np.isfinite(solid_angles.value))
+            or np.any(solid_angles.value <= 0)
+            or not np.all(np.isfinite(widths.value))
+            or np.any(widths.value <= 0)
+        ):
+            raise ValueError(
+                "Background radiance, pixel areas, and bin widths "
+                "must be finite and physically valid."
+            )
+
+        qe = mode["inst"]["QE"](
+            np.atleast_1d(wavelengths)
+        )
+
+        # Photon rate contributed by each sky pixel before
+        # applying the interferometric transmission.
+        patch_rates = (
+            radiance
+            * solid_angles[:, None]
+            * widths[None, :]
+            * self.total_collecting_area
+            * mode["attenuation"]
+            * qe
+        ).to(1 / u.s)
+
+        # Sum incoherent emission from all sky pixels.
+        rate_left = (
+            left * patch_rates[None, :, :]
+        ).sum(axis=1)
+
+        rate_right = (
+            right * patch_rates[None, :, :]
+        ).sum(axis=1)
+
+        return rate_left.to(1 / u.s), rate_right.to(1 / u.s)
 
 
     # ================================================================

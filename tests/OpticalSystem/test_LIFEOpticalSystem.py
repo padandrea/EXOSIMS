@@ -381,6 +381,198 @@ def test_planet_photon_rates():
         (transmission_right * expected_rate).to_value(1 / u.s),
     )
 
+def test_stellar_leakage_rates():
+    """Compare analytic stellar leakage with numerical disk averaging."""
+    life = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+        scienceInstruments=[
+            {
+                "name": "LIFE-spectrometer",
+                "QE": 0.5,
+                "optics": 0.8,
+            }
+        ],
+        starlightSuppressionSystems=[
+            {
+                "name": "nuller",
+                "lam": 10000,
+                "optics": 0.75,
+            }
+        ],
+    )
+
+    positions = reference_collector_positions(
+        np.array([0.0, 60.0]) * u.deg
+    )
+    wavelengths = np.array([10.0, 12.0]) * u.um
+    widths = np.array([0.3, 0.36]) * u.um
+    radius = 1.0 * u.mas
+
+    flux = (
+        np.array([1.0e7, 1.2e7])
+        * u.photon / (u.s * u.m**2 * u.um)
+    )
+    mode = life.observingModes[0]
+
+    left_rate, right_rate = life.get_stellar_leakage_rates(
+        positions, wavelengths, widths, radius, flux, mode
+    )
+
+    # Independently average the point-source transmission
+    # over a uniform stellar disk.
+    n_radial = 32
+    n_azimuth = 48
+
+    radial = np.sqrt(
+        (np.arange(n_radial) + 0.5) / n_radial
+    )
+    angles = (
+        2.0 * np.pi * np.arange(n_azimuth) / n_azimuth
+    )
+
+    x = radial[:, None] * np.cos(angles[None, :])
+    y = radial[:, None] * np.sin(angles[None, :])
+
+    sky_points = np.column_stack(
+        (x.ravel(), y.ravel())
+    ) * radius
+
+    left_map, right_map, _ = life.get_transmission(
+        positions, wavelengths, sky_points
+    )
+
+    # The numerical samples represent equal-area disk elements.
+    average_left = left_map.mean(axis=1)
+    average_right = right_map.mean(axis=1)
+
+    incident_rate = (
+        flux
+        * widths
+        * life.total_collecting_area
+        * mode["attenuation"]
+        * mode["inst"]["QE"](wavelengths)
+    ).to(1 / u.s)
+
+    expected_left = average_left * incident_rate
+    expected_right = average_right * incident_rate
+
+    assert left_rate.shape == (2, 2)
+    assert right_rate.shape == (2, 2)
+
+    np.testing.assert_allclose(
+        left_rate.to_value(1 / u.s),
+        expected_left.to_value(1 / u.s),
+        rtol=1e-3,
+    )
+    np.testing.assert_allclose(
+        right_rate.to_value(1 / u.s),
+        expected_right.to_value(1 / u.s),
+        rtol=1e-3,
+    )
+
+    # A centered, symmetric stellar disk has identical
+    # mean leakage in both chopped outputs.
+    np.testing.assert_allclose(
+        left_rate.to_value(1 / u.s),
+        right_rate.to_value(1 / u.s),
+        rtol=1e-12,
+    )
+
+    assert np.all(left_rate > 0 * (1 / u.s))
+
+
+def test_extended_background_rates():
+    """Verify integration of background radiance over sky pixels."""
+    life = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+        scienceInstruments=[
+            {
+                "name": "LIFE-spectrometer",
+                "QE": 0.5,
+                "optics": 0.8,
+            }
+        ],
+        starlightSuppressionSystems=[
+            {
+                "name": "nuller",
+                "lam": 10000,
+                "optics": 0.75,
+            }
+        ],
+    )
+
+    positions = reference_collector_positions(
+        np.array([0.0, 60.0]) * u.deg
+    )
+    wavelengths = np.array([10.0, 12.0]) * u.um
+    widths = np.array([0.3, 0.36]) * u.um
+
+    sky = np.array([
+        [0.0, 0.0],
+        [10.0, 5.0],
+        [-6.0, 8.0],
+    ]) * u.mas
+
+    radiance = (
+        np.array([
+            [100.0, 120.0],
+            [200.0, 220.0],
+            [150.0, 180.0],
+        ])
+        * u.photon / (u.s * u.m**2 * u.um * u.sr)
+    )
+
+    solid_angles = np.array([
+        1.0e-14, 2.0e-14, 1.5e-14
+    ]) * u.sr
+
+    mode = life.observingModes[0]
+
+    rate_left, rate_right = life.get_extended_background_rates(
+        positions, wavelengths, widths, sky,
+        radiance, solid_angles, mode
+    )
+
+    left, right, _ = life.get_transmission(
+        positions, wavelengths, sky
+    )
+
+    # Independent reference: add the contribution of each pixel.
+    patch_rates = (
+        radiance
+        * solid_angles[:, None]
+        * widths[None, :]
+        * (4.0 * np.pi * u.m**2)
+        * 0.8
+        * 0.75
+        * 0.5 / u.photon
+    ).to(1 / u.s)
+
+    expected_left = (
+        left * patch_rates[None, :, :]
+    ).sum(axis=1)
+
+    expected_right = (
+        right * patch_rates[None, :, :]
+    ).sum(axis=1)
+
+    assert rate_left.shape == (2, 2)
+    assert rate_right.shape == (2, 2)
+
+    np.testing.assert_allclose(
+        rate_left.to_value(1 / u.s),
+        expected_left.to_value(1 / u.s),
+    )
+    np.testing.assert_allclose(
+        rate_right.to_value(1 / u.s),
+        expected_right.to_value(1 / u.s),
+    )
+
+    assert np.all(rate_left >= 0 / u.s)
+    assert np.all(rate_right >= 0 / u.s)
+
 def test_transmission_energy_conservation():
     """Verify transmission normalization using a unitary beam combiner."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
