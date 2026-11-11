@@ -573,6 +573,365 @@ def test_extended_background_rates():
     assert np.all(rate_left >= 0 / u.s)
     assert np.all(rate_right >= 0 / u.s)
 
+
+def test_detector_noise_rates():
+    """Verify dark current and read-noise variance rates."""
+    life = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+        scienceInstruments=[
+            {
+                "name": "LIFE-spectrometer",
+                "QE": 0.5,
+                "optics": 0.8,
+                "idark": 0.02,
+                "sread": 4.0,
+                "texp": 40.0,
+            }
+        ],
+        starlightSuppressionSystems=[
+            {
+                "name": "nuller",
+                "lam": 10000,
+                "optics": 0.75,
+            }
+        ],
+    )
+
+    wavelengths = np.array([10.0, 12.0]) * u.um
+    pixels = np.array([3.0, 5.0])
+
+    dark, read = life.get_detector_noise_rates(
+        wavelengths, pixels, life.observingModes[0]
+    )
+
+    np.testing.assert_allclose(
+        dark.to_value(1 / u.s), [0.06, 0.10]
+    )
+    np.testing.assert_allclose(
+        read.to_value(1 / u.s), [0.30, 0.50]
+    )
+
+    assert dark.shape == (2,)
+    assert read.shape == (2,)
+
+    scalar_dark, scalar_read = life.get_detector_noise_rates(
+        wavelengths, 3.0, life.observingModes[0]
+    )
+
+    np.testing.assert_allclose(
+        scalar_dark.to_value(1 / u.s), [0.06, 0.06]
+    )
+    np.testing.assert_allclose(
+        scalar_read.to_value(1 / u.s), [0.30, 0.30]
+    )
+
+
+def test_detector_noise_rejects_invalid_inputs():
+    """Reject invalid pixel counts and detector parameters."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    wavelengths = np.array([10.0, 12.0]) * u.um
+
+    mode = {
+        "inst": {
+            "idark": 0.02 / u.s,
+            "sread": 4.0,
+            "texp": 40.0 * u.s,
+        }
+    }
+
+    with pytest.raises(ValueError, match="n_pixels_per_output"):
+        life.get_detector_noise_rates(
+            wavelengths, np.array([2.0, 0.0]), mode
+        )
+
+    with pytest.raises(ValueError, match="n_pixels_per_output"):
+        life.get_detector_noise_rates(
+            wavelengths, np.array([2.0, 3.0, 4.0]), mode
+        )
+
+    bad_mode = {
+        "inst": {**mode["inst"], "texp": 0.0 * u.s}
+    }
+
+    with pytest.raises(ValueError, match="texp"):
+        life.get_detector_noise_rates(
+            wavelengths, 3.0, bad_mode
+        )
+
+    bad_mode = {
+        "inst": {**mode["inst"], "sread": -1.0}
+    }
+
+    with pytest.raises(ValueError, match="sread"):
+        life.get_detector_noise_rates(
+            wavelengths, 3.0, bad_mode
+        )
+
+
+
+
+def test_calc_life_snr():
+    """Verify photon-limited and systematic-limited SNR."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    signal = np.array([3.0, 4.0]) / u.s
+    variance = np.array([4.0, 16.0]) / u.s
+    time = 10.0 * u.s
+
+    # Photon-noise-limited case:
+    # SNR^2 = 9*100/40 + 16*100/160 = 32.5
+    snr_photon = life.calc_life_snr(
+        signal, variance, time
+    )
+
+    assert snr_photon == pytest.approx(np.sqrt(32.5))
+
+    # Add an independent systematic floor in each channel.
+    systematic = np.array([0.5, 1.0]) / u.s
+
+    snr_systematic = life.calc_life_snr(
+        signal, variance, time, systematic
+    )
+
+    # Denominators: 40 + 25 = 65; 160 + 100 = 260.
+    expected_squared = 900.0 / 65.0 + 1600.0 / 260.0
+
+    assert snr_systematic == pytest.approx(
+        np.sqrt(expected_squared)
+    )
+
+    assert snr_systematic < snr_photon
+
+    # The systematic floor limits SNR at long times.
+    snr_long = life.calc_life_snr(
+        signal, variance, 1.0e10 * u.s, systematic
+    )
+
+    expected_limit = np.sqrt(
+        (3.0 / 0.5) ** 2 + (4.0 / 1.0) ** 2
+    )
+
+    assert snr_long == pytest.approx(
+        expected_limit, rel=1e-8
+    )
+
+    # Preserve the observing-configuration axis.
+    signal_2d = np.array([
+        [3.0, 4.0],
+        [1.0, 2.0],
+    ]) / u.s
+
+    variance_2d = np.array([
+        [4.0, 16.0],
+        [2.0, 4.0],
+    ]) / u.s
+
+    result = life.calc_life_snr(
+        signal_2d, variance_2d, time
+    )
+
+    assert result.shape == (2,)
+
+    np.testing.assert_allclose(
+        result,
+        [np.sqrt(32.5), np.sqrt(15.0)],
+    )
+
+
+def test_calc_life_snr_invalid_inputs():
+    """Reject inconsistent rates and invalid integration times."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    signal = np.array([3.0, 4.0]) / u.s
+    variance = np.array([4.0, 16.0]) / u.s
+
+    with pytest.raises(ValueError, match="positive"):
+        life.calc_life_snr(
+            signal, variance, 0.0 * u.s
+        )
+
+    with pytest.raises(ValueError, match="shape"):
+        life.calc_life_snr(
+            signal, np.array([4.0]) / u.s, 10.0 * u.s
+        )
+
+    with pytest.raises(ValueError, match="nonnegative"):
+        life.calc_life_snr(
+            signal,
+            np.array([4.0, -1.0]) / u.s,
+            10.0 * u.s,
+        )
+
+    with pytest.raises(ValueError, match="shape"):
+        life.calc_life_snr(
+            signal,
+            variance,
+            10.0 * u.s,
+            np.array([0.5]) / u.s,
+        )
+
+    with pytest.raises(ValueError, match="positive"):
+        life.calc_life_snr(
+            signal,
+            np.zeros(2) / u.s,
+            10.0 * u.s,
+        )
+
+
+def test_calc_life_int_time_photon_limited():
+    """Verify the analytical photon-noise integration time."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    signal = np.array([3.0, 4.0]) / u.s
+    variance = np.array([4.0, 16.0]) / u.s
+
+    required_time = life.calc_life_int_time(
+        signal, variance, snr_threshold=5.0
+    )
+
+    expected = 25.0 / (9.0 / 4.0 + 16.0 / 16.0)
+
+    assert required_time.to_value(u.s) == pytest.approx(
+        expected
+    )
+
+    # Verify that the calculated time actually reaches SNR=5.
+    actual_snr = life.calc_life_snr(
+        signal, variance, required_time
+    )
+
+    assert actual_snr == pytest.approx(5.0)
+
+    # Multiple observing configurations.
+    signals = np.array([
+        [3.0, 4.0],
+        [1.0, 2.0],
+    ]) / u.s
+
+    variances = np.array([
+        [4.0, 16.0],
+        [2.0, 4.0],
+    ]) / u.s
+
+    times = life.calc_life_int_time(
+        signals, variances, snr_threshold=5.0
+    )
+
+    assert times.shape == (2,)
+
+    np.testing.assert_allclose(
+        times.to_value(u.s),
+        [
+            25.0 / 3.25,
+            25.0 / 1.5,
+        ],
+    )
+
+
+def test_calc_life_int_time_systematics():
+    """Verify integration time with a systematic noise floor."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    signal = np.array([3.0]) / u.s
+    variance = np.array([4.0]) / u.s
+    systematic = np.array([0.5]) / u.s
+
+    required_time = life.calc_life_int_time(
+        signal,
+        variance,
+        snr_threshold=4.0,
+        systematic_rates=systematic,
+    )
+
+    # Single-channel analytical solution:
+    # t = SNR^2 * V / (S^2 - SNR^2 * Csp^2).
+    expected = 16.0 * 4.0 / (9.0 - 16.0 * 0.25)
+
+    assert required_time.to_value(u.s) == pytest.approx(
+        expected
+    )
+
+    actual_snr = life.calc_life_snr(
+        signal, variance, required_time, systematic
+    )
+
+    assert actual_snr == pytest.approx(4.0)
+
+    # Maximum achievable SNR = 3 / 0.5 = 6.
+    unreachable = life.calc_life_int_time(
+        signal,
+        variance,
+        snr_threshold=6.0,
+        systematic_rates=systematic,
+    )
+
+    assert np.isnan(unreachable.to_value(u.s))
+
+    # Multiple spectral channels with systematic noise.
+    signals = np.array([3.0, 4.0]) / u.s
+    variances = np.array([4.0, 16.0]) / u.s
+    systematics = np.array([0.5, 1.0]) / u.s
+
+    multi_time = life.calc_life_int_time(
+        signals,
+        variances,
+        snr_threshold=4.0,
+        systematic_rates=systematics,
+    )
+
+    assert multi_time.to_value(u.s) == pytest.approx(
+        7.111111111111111
+    )
+
+    assert life.calc_life_snr(
+        signals, variances, multi_time, systematics
+    ) == pytest.approx(4.0)
+
+
+def test_calc_life_int_time_invalid_inputs():
+    """Test invalid input and zero-signal cases."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    signal = np.array([3.0, 4.0]) / u.s
+    variance = np.array([4.0, 16.0]) / u.s
+
+    with pytest.raises(ValueError, match="positive"):
+        life.calc_life_int_time(
+            signal, variance, snr_threshold=0.0
+        )
+
+    with pytest.raises(ValueError, match="shape"):
+        life.calc_life_int_time(
+            signal,
+            np.array([4.0]) / u.s,
+            snr_threshold=5.0,
+        )
+
+    with pytest.raises(ValueError, match="nonnegative"):
+        life.calc_life_int_time(
+            signal,
+            np.array([-1.0, 16.0]) / u.s,
+            snr_threshold=5.0,
+        )
+
+    with pytest.raises(ValueError, match="positive"):
+        life.calc_life_int_time(
+            signal,
+            np.zeros(2) / u.s,
+            snr_threshold=5.0,
+        )
+
+    # Without a planet signal, detection is impossible.
+    no_detection = life.calc_life_int_time(
+        np.zeros(2) / u.s,
+        variance,
+        snr_threshold=5.0,
+    )
+
+    assert np.isnan(no_detection.to_value(u.s))
+
 def test_transmission_energy_conservation():
     """Verify transmission normalization using a unitary beam combiner."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)

@@ -2,6 +2,7 @@
 
 import astropy.units as u
 import numpy as np
+from scipy.optimize import brentq
 from scipy.special import j1
 from synphot import Observation, SpectralElement
 from synphot.models import Box1D, Gaussian1D
@@ -742,12 +743,418 @@ class LIFEOpticalSystem(OpticalSystem):
         return rate_left.to(1 / u.s), rate_right.to(1 / u.s)
 
 
+    def get_detector_noise_rates(
+        self,
+        wavelengths: u.Quantity,
+        n_pixels_per_output: float | np.ndarray,
+        mode: dict,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Calculate detector noise contributions per spectral channel.
+
+        Uses the EXOSIMS convention that sread represents the
+        effective read-noise variance per pixel per exposure.
+
+        Args:
+            wavelengths (astropy.units.Quantity):
+                Spectral-bin centers, used to determine output shape.
+            n_pixels_per_output (float or numpy.ndarray):
+                Effective number of detector pixels contributing
+                to each spectral channel of one chopped output.
+                May be a scalar or one value per wavelength.
+            mode (dict):
+                EXOSIMS observing mode.
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity]:
+                Dark-current count rate and read-noise-equivalent
+                variance rate per spectral channel, both expressed
+                in EXOSIMS count-rate-equivalent units (1/s).
+                Each has shape (n_wavelengths,).
+
+        Notes:
+            The returned quantities are for one chopped output.
+            Both outputs are assumed to have identical detector
+            properties and independent noise.
+
+            Read noise is not a photon count rate. Its equivalent
+            rate is used to compute accumulated noise variance.
+        """
+        if not isinstance(wavelengths, u.Quantity):
+            raise TypeError("wavelengths must be an Astropy Quantity.")
+
+        lam = np.atleast_1d(wavelengths.to_value(u.um))
+
+        if (
+            lam.ndim != 1
+            or lam.size == 0
+            or not np.all(np.isfinite(lam))
+            or np.any(lam <= 0)
+        ):
+            raise ValueError("wavelengths must be finite and positive.")
+
+        pixels = np.asarray(n_pixels_per_output, dtype=float)
+
+        if pixels.ndim == 0:
+            pixels = np.full(lam.shape, pixels.item())
+
+        if pixels.shape != lam.shape:
+            raise ValueError(
+                "n_pixels_per_output must be a scalar or have "
+                "one value per wavelength."
+            )
+
+        if not np.all(np.isfinite(pixels)) or np.any(pixels <= 0):
+            raise ValueError(
+                "n_pixels_per_output must be finite and positive."
+            )
+
+        inst = mode["inst"]
+
+        dark_current = inst["idark"].to(1 / u.s)
+        exposure_time = inst["texp"].to(u.s)
+        read_variance = float(inst["sread"])
+
+        if (
+            np.ndim(dark_current.value) != 0
+            or not np.isfinite(dark_current.value)
+            or dark_current.value < 0
+        ):
+            raise ValueError("idark must be finite and nonnegative.")
+
+        if (
+            np.ndim(exposure_time.value) != 0
+            or not np.isfinite(exposure_time.value)
+            or exposure_time.value <= 0
+        ):
+            raise ValueError("texp must be finite and positive.")
+
+        if not np.isfinite(read_variance) or read_variance < 0:
+            raise ValueError("sread must be finite and nonnegative.")
+
+        dark_rate = pixels * dark_current
+        read_rate = pixels * read_variance / exposure_time
+
+        return dark_rate.to(1 / u.s), read_rate.to(1 / u.s)
+
+
     # ================================================================
     # Stage 4 — Detection
     # ================================================================
-    # TODO: calc_life_snr()
-    # TODO: calc_life_int_time()
-    # Calculate matched-filter SNR and required integration time.
+    @staticmethod
+    def calc_life_snr(
+        signal_rates: u.Quantity,
+        noise_variance_rates: u.Quantity,
+        integration_time: u.Quantity,
+        systematic_rates: u.Quantity | None = None,
+    ) -> float | np.ndarray:
+        """Calculate spectral matched-filter detection SNR.
+
+        Assumes statistically independent spectral channels and
+        a fixed signal template.
+
+        Args:
+            signal_rates (astropy.units.Quantity):
+                Phase-chopped planet signal rates in 1/s.
+                The final axis represents wavelength.
+            noise_variance_rates (astropy.units.Quantity):
+                Photon and detector noise-variance rates in 1/s,
+                with the same shape as signal_rates.
+            integration_time (astropy.units.Quantity):
+                Positive scalar integration time.
+            systematic_rates (astropy.units.Quantity, optional):
+                Systematic noise amplitude rates in 1/s, with the
+                same shape as signal_rates. Defaults to zero.
+
+        Returns:
+            float or numpy.ndarray:
+                Dimensionless SNR, summed over the spectral axis.
+                Leading dimensions are preserved.
+
+        Notes:
+            SNR**2 = sum((S*t)**2 / (V*t + (Csp*t)**2)).
+
+            Systematic noise is assumed independent between
+            spectral channels. Correlated systematics require
+            a covariance-matrix formulation.
+        """
+        if not isinstance(signal_rates, u.Quantity):
+            raise TypeError("signal_rates must be a Quantity.")
+
+        if not isinstance(noise_variance_rates, u.Quantity):
+            raise TypeError("noise_variance_rates must be a Quantity.")
+
+        if not isinstance(integration_time, u.Quantity):
+            raise TypeError("integration_time must be a Quantity.")
+
+        signal = np.asarray(
+            signal_rates.to_value(1 / u.s), dtype=float
+        )
+        variance = np.asarray(
+            noise_variance_rates.to_value(1 / u.s), dtype=float
+        )
+        time = np.asarray(
+            integration_time.to_value(u.s), dtype=float
+        )
+
+        if signal.ndim == 0 or signal.shape[-1] == 0:
+            raise ValueError("signal_rates must have a spectral axis.")
+
+        if variance.shape != signal.shape:
+            raise ValueError(
+                "noise_variance_rates must match signal_rates shape."
+            )
+
+        if time.ndim != 0 or not np.isfinite(time) or time <= 0:
+            raise ValueError(
+                "integration_time must be finite and positive."
+            )
+
+        if systematic_rates is None:
+            systematic = np.zeros_like(signal)
+        else:
+            if not isinstance(systematic_rates, u.Quantity):
+                raise TypeError(
+                    "systematic_rates must be a Quantity."
+                )
+
+            systematic = np.asarray(
+                systematic_rates.to_value(1 / u.s),
+                dtype=float,
+            )
+
+            if systematic.shape != signal.shape:
+                raise ValueError(
+                    "systematic_rates must match signal_rates shape."
+                )
+
+        if (
+            not np.all(np.isfinite(signal))
+            or not np.all(np.isfinite(variance))
+            or np.any(variance < 0)
+            or not np.all(np.isfinite(systematic))
+            or np.any(systematic < 0)
+        ):
+            raise ValueError(
+                "Rates must be finite, and noise rates nonnegative."
+            )
+
+        numerator = (signal * time) ** 2
+        denominator = (
+            variance * time + (systematic * time) ** 2
+        )
+
+        if np.any((denominator == 0) & (numerator > 0)):
+            raise ValueError(
+                "Noise variance must be positive wherever "
+                "the signal is nonzero."
+            )
+
+        # Zero-signal, zero-noise channels contribute zero SNR.
+        channel_snr_squared = np.zeros_like(numerator)
+
+        np.divide(
+            numerator,
+            denominator,
+            out=channel_snr_squared,
+            where=denominator > 0,
+        )
+
+        snr_squared = np.sum(
+            channel_snr_squared, axis=-1
+        )
+
+        result = np.sqrt(snr_squared)
+
+        return float(result) if result.ndim == 0 else result
+
+
+    @staticmethod
+    def calc_life_int_time(
+        signal_rates: u.Quantity,
+        noise_variance_rates: u.Quantity,
+        snr_threshold: float,
+        systematic_rates: u.Quantity | None = None,
+    ) -> u.Quantity:
+        """Calculate integration time required for a spectral detection.
+
+        Uses the same independent-channel noise model as calc_life_snr.
+
+        Args:
+            signal_rates (astropy.units.Quantity):
+                Phase-chopped planet signal rates in 1/s.
+                The final axis represents wavelength.
+            noise_variance_rates (astropy.units.Quantity):
+                Photon and detector noise-variance rates in 1/s.
+                Must be positive wherever the signal is nonzero.
+            snr_threshold (float):
+                Required positive detection SNR.
+            systematic_rates (astropy.units.Quantity, optional):
+                Systematic noise amplitude rates in 1/s.
+                Defaults to zero.
+
+        Returns:
+            astropy.units.Quantity:
+                Required integration time in seconds.
+                Leading input dimensions are preserved.
+                Returns NaN for unreachable detection thresholds.
+
+        Notes:
+            SNR**2 = sum(S**2 * t / (V + Csp**2 * t)).
+
+            Assumes independent spectral channels and time-independent
+            signal and noise rates.
+        """
+        if not isinstance(signal_rates, u.Quantity):
+            raise TypeError("signal_rates must be a Quantity.")
+
+        if not isinstance(noise_variance_rates, u.Quantity):
+            raise TypeError(
+                "noise_variance_rates must be a Quantity."
+            )
+
+        signal = np.asarray(
+            signal_rates.to_value(1 / u.s), dtype=float
+        )
+        variance = np.asarray(
+            noise_variance_rates.to_value(1 / u.s), dtype=float
+        )
+
+        if signal.ndim == 0 or signal.shape[-1] == 0:
+            raise ValueError("signal_rates must have a spectral axis.")
+
+        if variance.shape != signal.shape:
+            raise ValueError(
+                "noise_variance_rates must match signal_rates shape."
+            )
+
+        if systematic_rates is None:
+            systematic = np.zeros_like(signal)
+        else:
+            if not isinstance(systematic_rates, u.Quantity):
+                raise TypeError(
+                    "systematic_rates must be a Quantity."
+                )
+
+            systematic = np.asarray(
+                systematic_rates.to_value(1 / u.s),
+                dtype=float,
+            )
+
+            if systematic.shape != signal.shape:
+                raise ValueError(
+                    "systematic_rates must match signal_rates shape."
+                )
+
+        threshold = np.asarray(snr_threshold, dtype=float)
+
+        if (
+            threshold.ndim != 0
+            or not np.isfinite(threshold)
+            or threshold <= 0
+        ):
+            raise ValueError(
+                "snr_threshold must be finite and positive."
+            )
+
+        if (
+            not np.all(np.isfinite(signal))
+            or not np.all(np.isfinite(variance))
+            or np.any(variance < 0)
+            or not np.all(np.isfinite(systematic))
+            or np.any(systematic < 0)
+        ):
+            raise ValueError(
+                "Rates must be finite, and noise rates nonnegative."
+            )
+
+        if np.any((signal != 0) & (variance <= 0)):
+            raise ValueError(
+                "Noise variance must be positive wherever "
+                "the signal is nonzero."
+            )
+
+        target_squared = float(threshold) ** 2
+        n_wavelengths = signal.shape[-1]
+
+        # One result per observing configuration.
+        results = np.full(
+            signal.shape[:-1], np.nan, dtype=float
+        )
+
+        signal_rows = signal.reshape(-1, n_wavelengths)
+        variance_rows = variance.reshape(-1, n_wavelengths)
+        systematic_rows = systematic.reshape(-1, n_wavelengths)
+
+        for index, (s, v, csp) in enumerate(
+            zip(signal_rows, variance_rows, systematic_rows)
+        ):
+            active = s != 0
+
+            # No planet signal means no detection.
+            if not np.any(active):
+                continue
+
+            signal_squared = s[active] ** 2
+            photon_variance = v[active]
+            systematic_squared = csp[active] ** 2
+
+            # A finite systematic floor can make the required
+            # detection SNR impossible.
+            if np.all(systematic_squared > 0):
+                maximum_snr_squared = np.sum(
+                    signal_squared / systematic_squared
+                )
+
+                if target_squared >= maximum_snr_squared:
+                    continue
+
+            # Exact photon-noise-only solution.
+            photon_time = target_squared / np.sum(
+                signal_squared / photon_variance
+            )
+
+            if np.all(systematic_squared == 0):
+                results.flat[index] = photon_time
+                continue
+
+            # General case: numerically invert the SNR equation.
+            def residual(time):
+                if time == 0:
+                    return -target_squared
+
+                snr_squared = np.sum(
+                    signal_squared
+                    / (
+                        photon_variance / time
+                        + systematic_squared
+                    )
+                )
+
+                return snr_squared - target_squared
+
+            # Systematic noise cannot shorten the required
+            # integration time relative to the photon-only model.
+            upper = photon_time
+
+            for _ in range(512):
+                if not np.isfinite(upper):
+                    break
+
+                if residual(upper) >= 0:
+                    results.flat[index] = brentq(
+                        residual,
+                        0.0,
+                        upper,
+                        xtol=1e-12,
+                        rtol=1e-12,
+                    )
+                    break
+
+                upper *= 2.0
+
+        return results * u.s
+
+
 
     # ================================================================
     # Stage 5 — EXOSIMS compatibility
