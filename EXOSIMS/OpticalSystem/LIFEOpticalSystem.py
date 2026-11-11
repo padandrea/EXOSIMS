@@ -415,9 +415,83 @@ class LIFEOpticalSystem(OpticalSystem):
     # ================================================================
     # Stage 3 — Photon rates
     # ================================================================
-    # TODO: get_photon_rates()
-    # Calculate planet, stellar leakage, zodiacal, exozodiacal
-    # and detector photon rates.
+    def get_planet_photon_rates(
+        self,
+        collector_positions: u.Quantity,
+        wavelengths: u.Quantity,
+        bin_widths: u.Quantity,
+        sky_positions: u.Quantity,
+        planet_spectral_flux: u.Quantity,
+        mode: dict,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Calculate planet count rates in the two chopped outputs.
+
+        Args:
+            collector_positions (astropy.units.Quantity):
+                Collector coordinates in metres.
+            wavelengths (astropy.units.Quantity):
+                Wavelength-bin centers.
+            bin_widths (astropy.units.Quantity):
+                Width of each spectral bin.
+            sky_positions (astropy.units.Quantity):
+                Planet angular offsets from the star.
+            planet_spectral_flux (astropy.units.Quantity):
+                Planet photon flux density at the observer, with one
+                value per wavelength bin, in ph / (s m2 um).
+            mode (dict):
+                EXOSIMS observing mode.
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity]:
+                Left and right planet count rates in 1/s.
+                Shape: (n_configurations, n_sky, n_wavelengths).
+        """
+        left, right, _ = self.get_transmission(
+            collector_positions, wavelengths, sky_positions
+        )
+
+        flux = np.atleast_1d(
+            planet_spectral_flux.to(
+                u.photon / (u.s * u.m**2 * u.um)
+            )
+        )
+        widths = np.atleast_1d(bin_widths.to(u.um))
+        n_wavelengths = left.shape[-1]
+
+        if flux.shape != (n_wavelengths,):
+            raise ValueError(
+                "planet_spectral_flux must have one value per wavelength."
+            )
+
+        if widths.shape != (n_wavelengths,):
+            raise ValueError(
+                "bin_widths must have one value per wavelength."
+            )
+
+        if (
+            not np.all(np.isfinite(flux.value))
+            or np.any(flux.value < 0)
+            or not np.all(np.isfinite(widths.value))
+            or np.any(widths.value <= 0)
+        ):
+            raise ValueError("Fluxes and bin widths must be physically valid.")
+
+        qe = mode["inst"]["QE"](np.atleast_1d(wavelengths))
+        throughput = mode["attenuation"]
+
+        incident_rate = (
+            flux
+            * widths
+            * self.total_collecting_area
+            * throughput
+            * qe
+        ).to(1 / u.s)
+
+        return (
+            (left * incident_rate).to(1 / u.s),
+            (right * incident_rate).to(1 / u.s),
+        )
+
 
     # ================================================================
     # Stage 4 — Detection

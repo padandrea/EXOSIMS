@@ -313,6 +313,73 @@ def test_transmission_rejects_invalid_inputs():
             positions, wavelength, np.array([0, 0]) * u.m
         )
 
+def test_planet_photon_rates():
+    """Verify absolute photon rates in both chopped outputs."""
+    life = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+        scienceInstruments=[
+            {
+                "name": "LIFE-spectrometer",
+                "QE": 0.5,
+                "optics": 0.8,
+            }
+        ],
+        starlightSuppressionSystems=[
+            {
+                "name": "nuller",
+                "lam": 10000,
+                "optics": 0.75,
+            }
+        ],
+    )
+
+    positions = reference_collector_positions(
+        np.array([0.0]) * u.deg
+    )
+    wavelengths = np.array([10.0, 12.0]) * u.um
+    widths = np.array([0.3, 0.36]) * u.um
+    sky = np.array([5.0, 2.0]) * u.mas
+
+    flux = (
+        np.array([100.0, 200.0])
+        * u.photon / (u.s * u.m**2 * u.um)
+    )
+
+    mode = life.observingModes[0]
+
+    rate_left, rate_right = life.get_planet_photon_rates(
+        positions, wavelengths, widths, sky, flux, mode
+    )
+
+    transmission_left, transmission_right, _ = (
+        life.get_transmission(positions, wavelengths, sky)
+    )
+
+    # Four unobscured 2 m collectors: area = 4*pi m2.
+    # Instrument and nuller throughput: 0.8 * 0.75.
+    # Detector quantum efficiency: 0.5.
+    expected_rate = (
+        flux
+        * widths
+        * (4.0 * np.pi * u.m**2)
+        * 0.8
+        * 0.75
+        * 0.5 / u.photon
+    ).to(1 / u.s)
+
+    assert rate_left.shape == (1, 1, 2)
+    assert rate_right.shape == (1, 1, 2)
+
+    np.testing.assert_allclose(
+        rate_left.to_value(1 / u.s),
+        (transmission_left * expected_rate).to_value(1 / u.s),
+    )
+
+    np.testing.assert_allclose(
+        rate_right.to_value(1 / u.s),
+        (transmission_right * expected_rate).to_value(1 / u.s),
+    )
 
 def test_transmission_energy_conservation():
     """Verify transmission normalization using a unitary beam combiner."""
