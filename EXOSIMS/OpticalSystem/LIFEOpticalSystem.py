@@ -28,7 +28,6 @@ class LIFEOpticalSystem(OpticalSystem):
     # ================================================================
     # Configure the LIFE instrument and initialize EXOSIMS interfaces.
 
-
     def populate_observingModes(self, observingModes):
         """Helper method to parse input observingMode dictionaries and assign default
         values, as needed. Also creates the allowed_observingMode_kws attribute.
@@ -197,12 +196,9 @@ class LIFEOpticalSystem(OpticalSystem):
 
         self.populate_observingModes_extra()
 
-
     # ================================================================
     # Stage 1 —  Spectral configuration
     # ================================================================
-
-
 
     # ----------------------------------------------------------------
     # Spectral configuration
@@ -280,9 +276,7 @@ class LIFEOpticalSystem(OpticalSystem):
 
         return centers * u.m, widths * u.m
 
-    def get_spectral_bins_from_mode(
-        self, mode: dict
-    ) -> tuple[u.Quantity, u.Quantity]:
+    def get_spectral_bins_from_mode(self, mode: dict) -> tuple[u.Quantity, u.Quantity]:
         """Calculate wavelength bins from an EXOSIMS observing mode."""
         if "spec" not in mode["inst"]["name"].lower():
             raise ValueError("Spectral binning requires a spectrometer.")
@@ -374,9 +368,7 @@ class LIFEOpticalSystem(OpticalSystem):
         try:
             positions_m = np.asarray(collector_positions.to_value(u.m))
         except u.UnitConversionError as exc:
-            raise ValueError(
-                "collector_positions must have length units."
-            ) from exc
+            raise ValueError("collector_positions must have length units.") from exc
 
         if positions_m.ndim == 2:
             positions_m = positions_m[np.newaxis, :, :]
@@ -396,8 +388,7 @@ class LIFEOpticalSystem(OpticalSystem):
         relative_positions = positions_m - positions_m[:, :1, :]
         delays_m = np.einsum("rjc,sc->rsj", relative_positions, theta)
         geometric_phase = (
-            2.0 * np.pi * delays_m[:, :, None, :]
-            / wavelength_m[None, None, :, None]
+            2.0 * np.pi * delays_m[:, :, None, :] / wavelength_m[None, None, :, None]
         )
 
         phase_left = np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2])
@@ -412,7 +403,6 @@ class LIFEOpticalSystem(OpticalSystem):
 
         unit = u.dimensionless_unscaled
         return left * unit, right * unit, (left - right) * unit
-
 
     # ================================================================
     # Stage 3 — Photon rates
@@ -452,23 +442,15 @@ class LIFEOpticalSystem(OpticalSystem):
             collector_positions, wavelengths, sky_positions
         )
 
-        flux = np.atleast_1d(
-            planet_spectral_flux.to(
-                u.photon / (u.s * u.m**2 * u.um)
-            )
-        )
+        flux = np.atleast_1d(planet_spectral_flux.to(u.photon / (u.s * u.m**2 * u.um)))
         widths = np.atleast_1d(bin_widths.to(u.um))
         n_wavelengths = left.shape[-1]
 
         if flux.shape != (n_wavelengths,):
-            raise ValueError(
-                "planet_spectral_flux must have one value per wavelength."
-            )
+            raise ValueError("planet_spectral_flux must have one value per wavelength.")
 
         if widths.shape != (n_wavelengths,):
-            raise ValueError(
-                "bin_widths must have one value per wavelength."
-            )
+            raise ValueError("bin_widths must have one value per wavelength.")
 
         if (
             not np.all(np.isfinite(flux.value))
@@ -482,18 +464,13 @@ class LIFEOpticalSystem(OpticalSystem):
         throughput = mode["attenuation"]
 
         incident_rate = (
-            flux
-            * widths
-            * self.total_collecting_area
-            * throughput
-            * qe
+            flux * widths * self.total_collecting_area * throughput * qe
         ).to(1 / u.s)
 
         return (
             (left * incident_rate).to(1 / u.s),
             (right * incident_rate).to(1 / u.s),
         )
-
 
     def get_stellar_leakage_rates(
         self,
@@ -555,11 +532,7 @@ class LIFEOpticalSystem(OpticalSystem):
 
         lam = np.atleast_1d(wavelengths.to_value(u.m))
         widths = np.atleast_1d(bin_widths.to(u.um))
-        flux = np.atleast_1d(
-            stellar_spectral_flux.to(
-                u.photon / (u.s * u.m**2 * u.um)
-            )
-        )
+        flux = np.atleast_1d(stellar_spectral_flux.to(u.photon / (u.s * u.m**2 * u.um)))
         radius = np.asarray(stellar_angular_radius.to_value(u.rad))
 
         if (
@@ -580,15 +553,14 @@ class LIFEOpticalSystem(OpticalSystem):
             raise ValueError("stellar_angular_radius must be nonnegative.")
 
         # Pairwise projected collector separations.
-        baselines = (
-            positions[:, :, None, :]
-            - positions[:, None, :, :]
-        )
+        baselines = positions[:, :, None, :] - positions[:, None, :, :]
         baseline_lengths = np.linalg.norm(baselines, axis=-1)
 
         # Uniform-disk coherence: 2*J1(x)/x, with limit 1 at x=0.
         x = (
-            2.0 * np.pi * radius
+            2.0
+            * np.pi
+            * radius
             * baseline_lengths[:, None, :, :]
             / lam[None, :, None, None]
         )
@@ -605,19 +577,11 @@ class LIFEOpticalSystem(OpticalSystem):
         phase_left = np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2])
         phase_right = np.array([0.0, 3 * np.pi / 2, np.pi, np.pi / 2])
 
-        weights_left = np.cos(
-            phase_left[:, None] - phase_left[None, :]
-        )
-        weights_right = np.cos(
-            phase_right[:, None] - phase_right[None, :]
-        )
+        weights_left = np.cos(phase_left[:, None] - phase_left[None, :])
+        weights_right = np.cos(phase_right[:, None] - phase_right[None, :])
 
-        transmission_left = np.einsum(
-            "ij,cwij->cw", weights_left, coherence
-        ) / 16.0
-        transmission_right = np.einsum(
-            "ij,cwij->cw", weights_right, coherence
-        ) / 16.0
+        transmission_left = np.einsum("ij,cwij->cw", weights_left, coherence) / 16.0
+        transmission_right = np.einsum("ij,cwij->cw", weights_right, coherence) / 16.0
 
         # Remove possible negative values from floating-point roundoff.
         transmission_left = np.maximum(transmission_left, 0.0)
@@ -626,11 +590,7 @@ class LIFEOpticalSystem(OpticalSystem):
         qe = mode["inst"]["QE"](np.atleast_1d(wavelengths))
 
         incident_rate = (
-            flux
-            * widths
-            * self.total_collecting_area
-            * mode["attenuation"]
-            * qe
+            flux * widths * self.total_collecting_area * mode["attenuation"] * qe
         ).to(1 / u.s)
 
         return (
@@ -679,29 +639,20 @@ class LIFEOpticalSystem(OpticalSystem):
         n_sky = left.shape[1]
         n_wavelengths = left.shape[2]
 
-        radiance = spectral_radiance.to(
-            u.photon / (u.s * u.m**2 * u.um * u.sr)
-        )
-        solid_angles = np.atleast_1d(
-            pixel_solid_angles.to(u.sr)
-        )
+        radiance = spectral_radiance.to(u.photon / (u.s * u.m**2 * u.um * u.sr))
+        solid_angles = np.atleast_1d(pixel_solid_angles.to(u.sr))
         widths = np.atleast_1d(bin_widths.to(u.um))
 
         if radiance.shape != (n_sky, n_wavelengths):
             raise ValueError(
-                "spectral_radiance must have shape "
-                "(n_sky, n_wavelengths)."
+                "spectral_radiance must have shape " "(n_sky, n_wavelengths)."
             )
 
         if solid_angles.shape != (n_sky,):
-            raise ValueError(
-                "pixel_solid_angles must have shape (n_sky,)."
-            )
+            raise ValueError("pixel_solid_angles must have shape (n_sky,).")
 
         if widths.shape != (n_wavelengths,):
-            raise ValueError(
-                "bin_widths must have one value per wavelength."
-            )
+            raise ValueError("bin_widths must have one value per wavelength.")
 
         if (
             not np.all(np.isfinite(radiance.value))
@@ -716,9 +667,7 @@ class LIFEOpticalSystem(OpticalSystem):
                 "must be finite and physically valid."
             )
 
-        qe = mode["inst"]["QE"](
-            np.atleast_1d(wavelengths)
-        )
+        qe = mode["inst"]["QE"](np.atleast_1d(wavelengths))
 
         # Photon rate contributed by each sky pixel before
         # applying the interferometric transmission.
@@ -732,16 +681,11 @@ class LIFEOpticalSystem(OpticalSystem):
         ).to(1 / u.s)
 
         # Sum incoherent emission from all sky pixels.
-        rate_left = (
-            left * patch_rates[None, :, :]
-        ).sum(axis=1)
+        rate_left = (left * patch_rates[None, :, :]).sum(axis=1)
 
-        rate_right = (
-            right * patch_rates[None, :, :]
-        ).sum(axis=1)
+        rate_right = (right * patch_rates[None, :, :]).sum(axis=1)
 
         return rate_left.to(1 / u.s), rate_right.to(1 / u.s)
-
 
     def get_detector_noise_rates(
         self,
@@ -804,9 +748,7 @@ class LIFEOpticalSystem(OpticalSystem):
             )
 
         if not np.all(np.isfinite(pixels)) or np.any(pixels <= 0):
-            raise ValueError(
-                "n_pixels_per_output must be finite and positive."
-            )
+            raise ValueError("n_pixels_per_output must be finite and positive.")
 
         inst = mode["inst"]
 
@@ -836,10 +778,167 @@ class LIFEOpticalSystem(OpticalSystem):
 
         return dark_rate.to(1 / u.s), read_rate.to(1 / u.s)
 
-
     # ================================================================
     # Stage 4 — Detection
     # ================================================================
+
+    @staticmethod
+    def assemble_life_signal_noise(
+        planet_left: u.Quantity,
+        planet_right: u.Quantity,
+        stellar_left: u.Quantity,
+        stellar_right: u.Quantity,
+        background_rates: list[tuple[u.Quantity, u.Quantity]] | None = None,
+        detector_dark_rate: u.Quantity | None = None,
+        detector_read_variance_rate: u.Quantity | None = None,
+        rotation_fractions: np.ndarray | None = None,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Assemble phase-chopped signal and noise-variance rates.
+
+        Args:
+            planet_left (astropy.units.Quantity):
+                Planet rates with shape (n_rotations, n_planets, n_wavelengths).
+            planet_right (astropy.units.Quantity):
+                Planet rates in the right output, same shape.
+            stellar_left (astropy.units.Quantity):
+                Stellar leakage with shape (n_rotations, n_wavelengths).
+            stellar_right (astropy.units.Quantity):
+                Stellar leakage in the right output.
+            background_rates (list, optional):
+                Left/right pairs of extended-background rates.
+                Each component has shape (n_rotations, n_wavelengths).
+            detector_dark_rate (astropy.units.Quantity, optional):
+                Dark-current rate per output, shape (n_wavelengths,).
+            detector_read_variance_rate (astropy.units.Quantity, optional):
+                Read-noise-equivalent variance rate per output.
+            rotation_fractions (numpy.ndarray, optional):
+                Fraction of total integration time per rotation.
+                Defaults to equal exposure fractions.
+
+        Returns:
+            tuple[astropy.units.Quantity, astropy.units.Quantity]:
+                Signal and variance rates in 1/s.
+                Shape: (n_planets, n_rotations * n_wavelengths).
+
+        Notes:
+            Planet signal is the left-minus-right difference.
+            Independent photon-noise variances from both outputs add.
+
+            Rotation fractions weight both signal and variance rates.
+            Each rotation-wavelength pair is treated as an
+            independent measurement channel.
+
+            Correlated noise and systematic residuals are excluded.
+        """
+        if not isinstance(planet_left, u.Quantity):
+            raise TypeError("planet_left must be a Quantity.")
+
+        shape = planet_left.shape
+
+        if len(shape) != 3 or any(size == 0 for size in shape):
+            raise ValueError(
+                "planet_left must have shape "
+                "(n_rotations, n_planets, n_wavelengths)."
+            )
+
+        n_rotations, n_planets, n_wavelengths = shape
+        spectral_shape = (n_rotations, n_wavelengths)
+
+        def check_rate(name, rate, expected_shape):
+            if not isinstance(rate, u.Quantity):
+                raise TypeError(f"{name} must be a Quantity.")
+
+            values = np.asarray(rate.to_value(1 / u.s), dtype=float)
+
+            if values.shape != expected_shape:
+                raise ValueError(f"{name} must have shape {expected_shape}.")
+
+            if not np.all(np.isfinite(values)) or np.any(values < 0):
+                raise ValueError(f"{name} must be finite and nonnegative.")
+
+            return values
+
+        pl = check_rate("planet_left", planet_left, shape)
+        pr = check_rate("planet_right", planet_right, shape)
+        sl = check_rate("stellar_left", stellar_left, spectral_shape)
+        sr = check_rate("stellar_right", stellar_right, spectral_shape)
+
+        # Photon noise from the stellar leakage.
+        background = sl + sr
+
+        # Add each independent extended-background component.
+        if background_rates is not None:
+            for index, pair in enumerate(background_rates):
+                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                    raise ValueError("Background components must be left/right pairs.")
+
+                bl = check_rate(
+                    f"background[{index}].left",
+                    pair[0],
+                    spectral_shape,
+                )
+                br = check_rate(
+                    f"background[{index}].right",
+                    pair[1],
+                    spectral_shape,
+                )
+
+                background += bl + br
+
+        # Detector variance for one output.
+        detector = np.zeros(n_wavelengths)
+
+        if detector_dark_rate is not None:
+            detector += check_rate(
+                "detector_dark_rate",
+                detector_dark_rate,
+                (n_wavelengths,),
+            )
+
+        if detector_read_variance_rate is not None:
+            detector += check_rate(
+                "detector_read_variance_rate",
+                detector_read_variance_rate,
+                (n_wavelengths,),
+            )
+
+        # Left and right outputs have independent detector noise.
+        background += 2.0 * detector[None, :]
+
+        # Allocate the total integration time among rotations.
+        if rotation_fractions is None:
+            fractions = np.full(n_rotations, 1.0 / n_rotations)
+        else:
+            fractions = np.asarray(rotation_fractions, dtype=float)
+
+            if (
+                fractions.shape != (n_rotations,)
+                or not np.all(np.isfinite(fractions))
+                or np.any(fractions < 0)
+                or not np.isclose(fractions.sum(), 1.0, rtol=0.0, atol=1e-12)
+            ):
+                raise ValueError(
+                    "rotation_fractions must be nonnegative, "
+                    "have one entry per rotation, and sum to one."
+                )
+
+        # Differential planet signal.
+        signal = (pl - pr) * fractions[:, None, None]
+
+        # Independent Poisson variances add, not subtract.
+        variance = (pl + pr + background[:, None, :]) * fractions[:, None, None]
+
+        # Merge rotation and wavelength into one channel axis.
+        signal = signal.transpose(1, 0, 2).reshape(
+            n_planets, n_rotations * n_wavelengths
+        )
+
+        variance = variance.transpose(1, 0, 2).reshape(
+            n_planets, n_rotations * n_wavelengths
+        )
+
+        return signal / u.s, variance / u.s
+
     @staticmethod
     def calc_life_snr(
         signal_rates: u.Quantity,
@@ -886,36 +985,24 @@ class LIFEOpticalSystem(OpticalSystem):
         if not isinstance(integration_time, u.Quantity):
             raise TypeError("integration_time must be a Quantity.")
 
-        signal = np.asarray(
-            signal_rates.to_value(1 / u.s), dtype=float
-        )
-        variance = np.asarray(
-            noise_variance_rates.to_value(1 / u.s), dtype=float
-        )
-        time = np.asarray(
-            integration_time.to_value(u.s), dtype=float
-        )
+        signal = np.asarray(signal_rates.to_value(1 / u.s), dtype=float)
+        variance = np.asarray(noise_variance_rates.to_value(1 / u.s), dtype=float)
+        time = np.asarray(integration_time.to_value(u.s), dtype=float)
 
         if signal.ndim == 0 or signal.shape[-1] == 0:
             raise ValueError("signal_rates must have a spectral axis.")
 
         if variance.shape != signal.shape:
-            raise ValueError(
-                "noise_variance_rates must match signal_rates shape."
-            )
+            raise ValueError("noise_variance_rates must match signal_rates shape.")
 
         if time.ndim != 0 or not np.isfinite(time) or time <= 0:
-            raise ValueError(
-                "integration_time must be finite and positive."
-            )
+            raise ValueError("integration_time must be finite and positive.")
 
         if systematic_rates is None:
             systematic = np.zeros_like(signal)
         else:
             if not isinstance(systematic_rates, u.Quantity):
-                raise TypeError(
-                    "systematic_rates must be a Quantity."
-                )
+                raise TypeError("systematic_rates must be a Quantity.")
 
             systematic = np.asarray(
                 systematic_rates.to_value(1 / u.s),
@@ -923,9 +1010,7 @@ class LIFEOpticalSystem(OpticalSystem):
             )
 
             if systematic.shape != signal.shape:
-                raise ValueError(
-                    "systematic_rates must match signal_rates shape."
-                )
+                raise ValueError("systematic_rates must match signal_rates shape.")
 
         if (
             not np.all(np.isfinite(signal))
@@ -934,19 +1019,14 @@ class LIFEOpticalSystem(OpticalSystem):
             or not np.all(np.isfinite(systematic))
             or np.any(systematic < 0)
         ):
-            raise ValueError(
-                "Rates must be finite, and noise rates nonnegative."
-            )
+            raise ValueError("Rates must be finite, and noise rates nonnegative.")
 
         numerator = (signal * time) ** 2
-        denominator = (
-            variance * time + (systematic * time) ** 2
-        )
+        denominator = variance * time + (systematic * time) ** 2
 
         if np.any((denominator == 0) & (numerator > 0)):
             raise ValueError(
-                "Noise variance must be positive wherever "
-                "the signal is nonzero."
+                "Noise variance must be positive wherever " "the signal is nonzero."
             )
 
         # Zero-signal, zero-noise channels contribute zero SNR.
@@ -959,14 +1039,11 @@ class LIFEOpticalSystem(OpticalSystem):
             where=denominator > 0,
         )
 
-        snr_squared = np.sum(
-            channel_snr_squared, axis=-1
-        )
+        snr_squared = np.sum(channel_snr_squared, axis=-1)
 
         result = np.sqrt(snr_squared)
 
         return float(result) if result.ndim == 0 else result
-
 
     @staticmethod
     def calc_life_int_time(
@@ -1008,32 +1085,22 @@ class LIFEOpticalSystem(OpticalSystem):
             raise TypeError("signal_rates must be a Quantity.")
 
         if not isinstance(noise_variance_rates, u.Quantity):
-            raise TypeError(
-                "noise_variance_rates must be a Quantity."
-            )
+            raise TypeError("noise_variance_rates must be a Quantity.")
 
-        signal = np.asarray(
-            signal_rates.to_value(1 / u.s), dtype=float
-        )
-        variance = np.asarray(
-            noise_variance_rates.to_value(1 / u.s), dtype=float
-        )
+        signal = np.asarray(signal_rates.to_value(1 / u.s), dtype=float)
+        variance = np.asarray(noise_variance_rates.to_value(1 / u.s), dtype=float)
 
         if signal.ndim == 0 or signal.shape[-1] == 0:
             raise ValueError("signal_rates must have a spectral axis.")
 
         if variance.shape != signal.shape:
-            raise ValueError(
-                "noise_variance_rates must match signal_rates shape."
-            )
+            raise ValueError("noise_variance_rates must match signal_rates shape.")
 
         if systematic_rates is None:
             systematic = np.zeros_like(signal)
         else:
             if not isinstance(systematic_rates, u.Quantity):
-                raise TypeError(
-                    "systematic_rates must be a Quantity."
-                )
+                raise TypeError("systematic_rates must be a Quantity.")
 
             systematic = np.asarray(
                 systematic_rates.to_value(1 / u.s),
@@ -1041,20 +1108,12 @@ class LIFEOpticalSystem(OpticalSystem):
             )
 
             if systematic.shape != signal.shape:
-                raise ValueError(
-                    "systematic_rates must match signal_rates shape."
-                )
+                raise ValueError("systematic_rates must match signal_rates shape.")
 
         threshold = np.asarray(snr_threshold, dtype=float)
 
-        if (
-            threshold.ndim != 0
-            or not np.isfinite(threshold)
-            or threshold <= 0
-        ):
-            raise ValueError(
-                "snr_threshold must be finite and positive."
-            )
+        if threshold.ndim != 0 or not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("snr_threshold must be finite and positive.")
 
         if (
             not np.all(np.isfinite(signal))
@@ -1063,23 +1122,18 @@ class LIFEOpticalSystem(OpticalSystem):
             or not np.all(np.isfinite(systematic))
             or np.any(systematic < 0)
         ):
-            raise ValueError(
-                "Rates must be finite, and noise rates nonnegative."
-            )
+            raise ValueError("Rates must be finite, and noise rates nonnegative.")
 
         if np.any((signal != 0) & (variance <= 0)):
             raise ValueError(
-                "Noise variance must be positive wherever "
-                "the signal is nonzero."
+                "Noise variance must be positive wherever " "the signal is nonzero."
             )
 
         target_squared = float(threshold) ** 2
         n_wavelengths = signal.shape[-1]
 
         # One result per observing configuration.
-        results = np.full(
-            signal.shape[:-1], np.nan, dtype=float
-        )
+        results = np.full(signal.shape[:-1], np.nan, dtype=float)
 
         signal_rows = signal.reshape(-1, n_wavelengths)
         variance_rows = variance.reshape(-1, n_wavelengths)
@@ -1101,17 +1155,13 @@ class LIFEOpticalSystem(OpticalSystem):
             # A finite systematic floor can make the required
             # detection SNR impossible.
             if np.all(systematic_squared > 0):
-                maximum_snr_squared = np.sum(
-                    signal_squared / systematic_squared
-                )
+                maximum_snr_squared = np.sum(signal_squared / systematic_squared)
 
                 if target_squared >= maximum_snr_squared:
                     continue
 
             # Exact photon-noise-only solution.
-            photon_time = target_squared / np.sum(
-                signal_squared / photon_variance
-            )
+            photon_time = target_squared / np.sum(signal_squared / photon_variance)
 
             if np.all(systematic_squared == 0):
                 results.flat[index] = photon_time
@@ -1123,11 +1173,7 @@ class LIFEOpticalSystem(OpticalSystem):
                     return -target_squared
 
                 snr_squared = np.sum(
-                    signal_squared
-                    / (
-                        photon_variance / time
-                        + systematic_squared
-                    )
+                    signal_squared / (photon_variance / time + systematic_squared)
                 )
 
                 return snr_squared - target_squared
@@ -1154,14 +1200,221 @@ class LIFEOpticalSystem(OpticalSystem):
 
         return results * u.s
 
-
-
     # ================================================================
-    # Stage 5 — EXOSIMS compatibility
+    # Stage 5 — EXOSIMS compatibility (photon-noise reference)
     # ================================================================
-    # TODO: Cp_Cb_Csp()
-    # TODO: calc_intTime()
-    # TODO: calc_dMag_per_intTime()
-    # TODO: ddMag_dt()
-    # TODO: calc_saturation_dMag()
-    # Connect LIFE calculations to the EXOSIMS OpticalSystem API.
+
+    def _get_life_spectral_rates(self, TL, sInds, fZ, JEZ, dMag, WA, mode, TK):
+        """Obtain observation-specific spectral rates.
+
+        A callable life_rate_provider must be attached to this
+        instance. It receives the standard EXOSIMS observation
+        arguments and returns the spectral rates.
+
+        Returns:
+            tuple:
+                Signal, noise-variance, and systematic rates in 1/s,
+                each shaped (n_candidates, n_channels).
+
+        Notes:
+            The provider is responsible for constructing the
+            thermal-IR observation. This method does not generate
+            stellar or planetary spectra.
+        """
+        provider = getattr(self, "life_rate_provider", None)
+
+        if not callable(provider):
+            raise NotImplementedError(
+                "LIFE requires observation-specific spectral rates. "
+                "Attach a callable life_rate_provider before using "
+                "the standard EXOSIMS OpticalSystem interfaces."
+            )
+
+        result = provider(TL, sInds, fZ, JEZ, dMag, WA, mode, TK)
+
+        if not isinstance(result, (tuple, list)) or len(result) not in (2, 3):
+            raise ValueError(
+                "life_rate_provider must return (signal, variance) "
+                "or (signal, variance, systematic)."
+            )
+
+        signal, variance = result[:2]
+        systematic = result[2] if len(result) == 3 else None
+
+        for name, value in (
+            ("signal", signal),
+            ("variance", variance),
+        ):
+            if not isinstance(value, u.Quantity):
+                raise TypeError(f"{name} must be an Astropy Quantity.")
+
+        signal = signal.to(1 / u.s)
+        variance = variance.to(1 / u.s)
+
+        if (
+            signal.ndim != 2
+            or signal.shape[0] == 0
+            or signal.shape[1] == 0
+            or variance.shape != signal.shape
+        ):
+            raise ValueError(
+                "signal and variance must have identical, nonempty "
+                "(n_candidates, n_channels) shapes."
+            )
+
+        if systematic is None:
+            systematic = np.zeros(signal.shape) / u.s
+        elif not isinstance(systematic, u.Quantity):
+            raise TypeError("systematic must be an Astropy Quantity.")
+        else:
+            systematic = systematic.to(1 / u.s)
+
+        if systematic.shape != signal.shape:
+            raise ValueError("systematic must match the signal shape.")
+
+        s = signal.to_value(1 / u.s)
+        v = variance.to_value(1 / u.s)
+        csp = systematic.to_value(1 / u.s)
+
+        if (
+            not np.all(np.isfinite(s))
+            or not np.all(np.isfinite(v))
+            or not np.all(np.isfinite(csp))
+            or np.any(v < 0)
+            or np.any(csp < 0)
+        ):
+            raise ValueError("Signal and noise rates must be finite and valid.")
+
+        if np.any((v == 0) & (s != 0)):
+            raise ValueError("Nonzero signal requires positive variance.")
+
+        return signal, variance, systematic
+
+    def Cp_Cb_Csp(
+        self,
+        TL,
+        sInds,
+        fZ,
+        JEZ,
+        dMag,
+        WA,
+        mode,
+        returnExtra=False,
+        TK=None,
+    ):
+        """Return SNR-equivalent count rates for photon-noise-only LIFE.
+
+        The effective signal rate is defined by
+
+            C_p**2 / C_b = sum_i(S_i**2 / V_i).
+
+        C_b is the sum of independent noise-variance rates.
+        C_p is an effective matched-filter signal, not the
+        physical planet photon count rate.
+
+        The mapping preserves the spectral SNR for all positive
+        integration times when systematic rates are zero.
+        """
+        if returnExtra:
+            raise NotImplementedError(
+                "LIFE returnExtra needs a validated per-source " "rate breakdown."
+            )
+
+        signal, variance, systematic = self._get_life_spectral_rates(
+            TL, sInds, fZ, JEZ, dMag, WA, mode, TK
+        )
+
+        if np.any(systematic.to_value(1 / u.s) != 0):
+            raise NotImplementedError(
+                "A single (C_p, C_b, C_sp) triple cannot generally "
+                "preserve LIFE's multi-channel SNR with "
+                "systematic noise."
+            )
+
+        s = signal.to_value(1 / u.s)
+        v = variance.to_value(1 / u.s)
+
+        total_variance = np.sum(v, axis=1)
+
+        if np.any(total_variance <= 0):
+            raise ValueError("Total noise variance rate must be positive.")
+
+        weighted_snr_rate = np.zeros_like(s)
+
+        np.divide(
+            s**2,
+            v,
+            out=weighted_snr_rate,
+            where=v > 0,
+        )
+
+        coefficient = np.sum(weighted_snr_rate, axis=1)
+
+        C_b = total_variance / u.s
+        C_p = np.sqrt(coefficient * total_variance) / u.s
+        C_sp = np.zeros_like(coefficient) / u.s
+
+        return C_p, C_b, C_sp
+
+    def calc_intTime(self, TL, sInds, fZ, JEZ, dMag, WA, mode, TK=None):
+        """Compute spectral LIFE integration times in days.
+
+        Preserves the EXOSIMS method signature while using
+        the LIFE spectral matched-filter calculation directly.
+        """
+        signal, variance, systematic = self._get_life_spectral_rates(
+            TL, sInds, fZ, JEZ, dMag, WA, mode, TK
+        )
+
+        return self.calc_life_int_time(
+            signal,
+            variance,
+            snr_threshold=mode["SNR"],
+            systematic_rates=systematic,
+        ).to(u.day)
+
+    def calc_dMag_per_intTime(
+        self,
+        intTimes,
+        TL,
+        sInds,
+        fZ,
+        JEZ,
+        WA,
+        mode,
+        C_b=None,
+        C_sp=None,
+        TK=None,
+        analytic_only=False,
+    ):
+        """Reject reflected-light dMag inversion for thermal LIFE."""
+        raise NotImplementedError(
+            "LIFE needs a defined thermal brightness/spectral "
+            "template before calc_dMag_per_intTime can be implemented."
+        )
+
+    def ddMag_dt(
+        self,
+        intTimes,
+        TL,
+        sInds,
+        fZ,
+        JEZ,
+        WA,
+        mode,
+        C_b=None,
+        C_sp=None,
+        TK=None,
+    ):
+        """Reject the inherited reflected-light dMag derivative."""
+        raise NotImplementedError(
+            "LIFE ddMag_dt requires a thermal brightness convention."
+        )
+
+    def calc_saturation_dMag(self, TL, sInds, fZ, JEZ, WA, mode, TK=None):
+        """Reject an unsupported coronagraphic saturation threshold."""
+        raise NotImplementedError(
+            "No finite LIFE systematic floor is defined; "
+            "an inherited contrast-limited saturation dMag "
+            "would be unphysical."
+        )
