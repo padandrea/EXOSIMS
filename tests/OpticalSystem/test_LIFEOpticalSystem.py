@@ -142,6 +142,64 @@ def test_get_spectral_bins_from_mode():
     )
 
 
+def test_life_explicit_wavelength_limits():
+    """Verify LIFE wavelength limits from JSON configuration."""
+    path = resource_path("test-scripts/template_minimal.json")
+
+    with open(path, encoding="utf-8") as file:
+        specs = json.load(file)
+
+    specs["scienceInstruments"][0]["name"] = "LIFE-spectrometer"
+    specs["scienceInstruments"][0]["Rs"] = 33.3
+
+    specs["starlightSuppressionSystems"][0]["name"] = "nuller"
+
+    specs["observingModes"] = [
+        {
+            "instName": "LIFE-spectrometer",
+            "systName": "nuller",
+            "LIFE_lambda_min": 4000,
+            "LIFE_lambda_max": 18500,
+            "bandpass_model": "box",
+            "SNR": 5,
+        }
+    ]
+
+    life = LIFEOpticalSystem(**specs)
+    mode = life.observingModes[0]
+
+    assert mode["lam"].to_value(u.um) == pytest.approx(11.25)
+    assert mode["deltaLam"].to_value(u.um) == pytest.approx(14.5)
+    assert mode["inst"]["Rs"] == pytest.approx(33.3)
+
+    centers, widths = life.get_spectral_bins_from_mode(mode)
+
+    lower_edges = centers - widths / 2
+    upper_edges = centers + widths / 2
+
+    assert lower_edges[0].to_value(u.um) == pytest.approx(4.0)
+    assert upper_edges[-1].to_value(u.um) == pytest.approx(18.5)
+
+
+def test_life_wavelength_limits_require_both_keys():
+    """Reject a partially specified LIFE wavelength range."""
+    path = resource_path("test-scripts/template_minimal.json")
+
+    with open(path, encoding="utf-8") as file:
+        specs = json.load(file)
+
+    specs["observingModes"] = [
+        {
+            "instName": "imager",
+            "systName": "coronagraph",
+            "LIFE_lambda_min": 4000,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="must be specified together"):
+        LIFEOpticalSystem(**specs)
+
+
 def test_transmission_shape_and_on_axis_null():
     """Both nulled outputs vanish for an on-axis point source."""
     life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)

@@ -74,6 +74,7 @@ class LIFEOpticalSystem(OpticalSystem):
             ][0]
 
             # start tracking allowed keywords
+
             self.allowed_observingMode_kws = [
                 "instName",
                 "systName",
@@ -83,19 +84,66 @@ class LIFEOpticalSystem(OpticalSystem):
                 "lam",
                 "deltaLam",
                 "BW",
+                "LIFE_lambda_min",
+                "LIFE_lambda_max",
                 "bandpass_model",
                 "bandpass_step",
             ]
 
-            # get mode wavelength and bandwidth (get system's values by default)
-            # when provided, always use deltaLam instead of BW (bandwidth fraction)
-            syst_lam = mode["syst"]["lam"].to("nm").value
-            syst_BW = mode["syst"]["BW"]
-            mode["lam"] = float(mode.get("lam", syst_lam)) * u.nm
-            mode["deltaLam"] = (
-                float(mode.get("deltaLam", mode["lam"].value * mode.get("BW", syst_BW)))
-                * u.nm
-            )
+            # Configure wavelength range.
+            # LIFE-specific limits take precedence over standard EXOSIMS
+            # central wavelength and bandwidth parameters.
+            has_life_min = "LIFE_lambda_min" in mode
+            has_life_max = "LIFE_lambda_max" in mode
+
+            if has_life_min != has_life_max:
+                raise ValueError(
+                    "LIFE_lambda_min and LIFE_lambda_max " "must be specified together."
+                )
+
+            if has_life_min:
+                # JSON wavelength limits are specified in nanometres.
+                try:
+                    lam_min = float(mode["LIFE_lambda_min"])
+                    lam_max = float(mode["LIFE_lambda_max"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "LIFE wavelength limits must be numeric "
+                        "values in nanometres."
+                    ) from exc
+
+                if (
+                    not np.isfinite(lam_min)
+                    or not np.isfinite(lam_max)
+                    or lam_min <= 0
+                    or lam_max <= lam_min
+                ):
+                    raise ValueError(
+                        "LIFE wavelength limits must be finite, "
+                        "positive, and satisfy min < max."
+                    )
+
+                # Derive standard EXOSIMS parameters.
+                mode["lam"] = 0.5 * (lam_min + lam_max) * u.nm
+                mode["deltaLam"] = (lam_max - lam_min) * u.nm
+
+            else:
+                # Original EXOSIMS behavior.
+                syst_lam = mode["syst"]["lam"].to_value(u.nm)
+                syst_BW = mode["syst"]["BW"]
+
+                mode["lam"] = float(mode.get("lam", syst_lam)) * u.nm
+
+                mode["deltaLam"] = (
+                    float(
+                        mode.get(
+                            "deltaLam",
+                            mode["lam"].value * mode.get("BW", syst_BW),
+                        )
+                    )
+                    * u.nm
+                )
+
             mode["BW"] = float(mode["deltaLam"] / mode["lam"])
 
             # get mode IWA and OWA: rescale if the mode wavelength is different from
