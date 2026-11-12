@@ -306,15 +306,21 @@ class LIFEOpticalSystem(OpticalSystem):
 
         resolving_power = float(resolving_power)
 
-        if not np.isfinite(resolving_power) or resolving_power <= 0:
-            raise ValueError("resolving_power must be finite and positive.")
+        if not np.isfinite(resolving_power) or resolving_power <= 0.5:
+            raise ValueError("resolving_power must be finite and greater than 0.5.")
 
-        # Geometric wavelength bins with constant nominal resolving power.
-        step = 1.0 + 1.0 / resolving_power
+        # Exact resolving power at the arithmetic bin center:
+        #
+        # R = lambda_center / delta_lambda
+        #
+        # For a bin beginning at lambda_left:
+        # delta_lambda = lambda_left / (R - 0.5)
+        #
+        # Therefore, consecutive bin edges have this ratio:
+        relative_width = 1.0 / (resolving_power - 0.5)
+        step = 1.0 + relative_width
 
-        n_bins = int(
-            np.ceil(np.log(lam_max / lam_min) / np.log1p(1.0 / resolving_power))
-        )
+        n_bins = int(np.ceil(np.log(lam_max / lam_min) / np.log1p(relative_width)))
 
         edges = lam_min * step ** np.arange(n_bins + 1)
         edges[-1] = lam_max

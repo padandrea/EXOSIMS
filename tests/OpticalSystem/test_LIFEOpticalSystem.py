@@ -77,8 +77,8 @@ def test_get_spectral_bins_reference():
         33.3,
     )
 
-    assert len(centers) == 52
-    assert len(widths) == 52
+    assert len(centers) == 51
+    assert len(widths) == 51
 
     # The first bin starts at 4 um.
     lower_edges = centers - widths / 2
@@ -103,7 +103,18 @@ def test_get_spectral_bins_reference():
 
     np.testing.assert_allclose(
         ratios.to_value(u.dimensionless_unscaled),
-        1.0 + 1.0 / 33.3,
+        1.0 + 1.0 / (33.3 - 0.5),
+        rtol=1e-12,
+    )
+
+    # Every complete bin must have exactly the requested
+    # resolving power at its arithmetic center.
+    # The final truncated bin is excluded.
+    actual_resolving_power = centers[:-1] / widths[:-1]
+
+    np.testing.assert_allclose(
+        actual_resolving_power.to_value(u.dimensionless_unscaled),
+        33.3,
         rtol=1e-12,
     )
 
