@@ -1110,7 +1110,7 @@ def test_life_exosims_adapter_systematics():
     with pytest.raises(NotImplementedError, match="single"):
         life.Cp_Cb_Csp(*args)
 
-    with pytest.raises(NotImplementedError, match="thermal"):
+    with pytest.raises(NotImplementedError, match="numerical"):
         life.calc_dMag_per_intTime(
             10 * u.s,
             None,
@@ -1119,7 +1119,119 @@ def test_life_exosims_adapter_systematics():
             None,
             wa,
             mode,
+            analytic_only=True,
         )
+
+
+def test_life_thermal_dmag_inversion():
+    """Verify thermal dMag inversion and its time derivative."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+
+    s_inds = np.array([0, 1])
+    wa = np.array([1.0, 1.0]) * u.arcsec
+    mode = {"SNR": 5.0}
+
+    # Synthetic wavelength-dependent planet spectrum.
+    # This will later be supplied by a blackbody model.
+    spectral_shape = np.array([1.0, 0.7, 0.3])
+
+    # Chopped transmission changes sign between channels.
+    transmission = np.array([0.5, -0.3, 0.1])
+
+    background = np.array([8.0, 12.0, 6.0])
+
+    def provider(TL, sInds, fZ, JEZ, dMag, WA, mode, TK):
+        """Generate synthetic spectral rates for a trial dMag."""
+        dmag = np.asarray(dMag, dtype=float)
+
+        # Planet brightness scales with magnitude contrast.
+        contrast = 10 ** (-0.4 * dmag)
+
+        planet = 1e9 * contrast[:, None] * spectral_shape[None, :]
+
+        # Differential planet signal.
+        signal = planet * transmission[None, :]
+
+        # Include planet photon shot noise.
+        variance = background[None, :] + 0.7 * planet
+
+        return signal / u.s, variance / u.s
+
+    life.life_rate_provider = provider
+
+    original_dmag = np.array([19.0, 21.0])
+
+    # Step 1: Calculate integration time for known dMag.
+    integration_time = life.calc_intTime(
+        None,
+        s_inds,
+        None,
+        None,
+        original_dmag,
+        wa,
+        mode,
+    )
+
+    assert np.all(np.isfinite(integration_time.value))
+    assert np.all(integration_time.value > 0)
+
+    # Step 2: Recover dMag from that integration time.
+    recovered_dmag = life.calc_dMag_per_intTime(
+        integration_time,
+        None,
+        s_inds,
+        None,
+        None,
+        wa,
+        mode,
+    )
+
+    np.testing.assert_allclose(
+        recovered_dmag,
+        original_dmag,
+        atol=1e-6,
+    )
+
+    # Step 3: Longer integration permits fainter planets.
+    longer_dmag = life.calc_dMag_per_intTime(
+        2 * integration_time,
+        None,
+        s_inds,
+        None,
+        None,
+        wa,
+        mode,
+    )
+
+    assert np.all(longer_dmag > recovered_dmag)
+
+    # Step 4: Check derivative of limiting dMag.
+    derivative = life.ddMag_dt(
+        integration_time,
+        None,
+        s_inds,
+        None,
+        None,
+        wa,
+        mode,
+    )
+
+    assert derivative.unit.is_equivalent(1 / u.s)
+    assert np.all(np.isfinite(derivative.value))
+    assert np.all(derivative.value > 0)
+
+    # Step 5: Zero integration time is invalid.
+    invalid = life.calc_dMag_per_intTime(
+        np.array([0.0, 0.0]) * u.s,
+        None,
+        s_inds,
+        None,
+        None,
+        wa,
+        mode,
+    )
+
+    assert np.all(np.isnan(invalid))
 
 
 def test_transmission_energy_conservation():

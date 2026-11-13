@@ -1441,11 +1441,118 @@ class LIFEOpticalSystem(OpticalSystem):
         TK=None,
         analytic_only=False,
     ):
-        """Reject reflected-light dMag inversion for thermal LIFE."""
-        raise NotImplementedError(
-            "LIFE needs a defined thermal brightness/spectral "
-            "template before calc_dMag_per_intTime can be implemented."
-        )
+        """Calculate limiting dMag using LIFE's spectral SNR model.
+
+        The external rate provider supplies the planet's thermal
+        spectrum and all wavelength-dependent photon/noise rates.
+
+        dMag is defined as the band-integrated planet/star photon
+        flux ratio, with a fixed normalized planetary spectral shape.
+
+        The spectral template can initially be a blackbody and later
+        be replaced by an atmospheric spectrum.
+
+        Returns:
+            numpy.ndarray:
+                Limiting dMag for each target. NaN if unreachable.
+        """
+        if analytic_only:
+            raise NotImplementedError("LIFE uses numerical spectral dMag inversion.")
+
+        if C_b is not None or C_sp is not None:
+            raise NotImplementedError(
+                "LIFE requires spectral rates, not cached scalar rates."
+            )
+
+        if not isinstance(intTimes, u.Quantity):
+            raise TypeError("intTimes must be an Astropy Quantity.")
+
+        sInds = np.atleast_1d(sInds)
+        n_targets = len(sInds)
+
+        if n_targets == 0:
+            return np.array([])
+
+        times = np.asarray(intTimes.to_value(u.s), dtype=float)
+
+        if times.ndim == 0:
+            times = np.full(n_targets, float(times))
+        elif times.shape != (n_targets,):
+            raise ValueError("Integration times must match target count.")
+
+        threshold = float(mode["SNR"])
+
+        if not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("SNR threshold must be positive.")
+
+        valid = np.isfinite(times) & (times > 0)
+        safe_times = np.where(valid, times, 1.0)
+
+        def evaluate_snr(dmags):
+            """Evaluate LIFE SNR for a trial dMag at each target."""
+            signal, variance, systematic = self._get_life_spectral_rates(
+                TL, sInds, fZ, JEZ, dmags, WA, mode, TK
+            )
+
+            if signal.shape[0] != n_targets:
+                raise ValueError("Rate provider must return one row per target.")
+
+            s = signal.to_value(1 / u.s)
+            v = variance.to_value(1 / u.s)
+            csp = systematic.to_value(1 / u.s)
+
+            t = safe_times[:, None]
+
+            numerator = (s * t) ** 2
+            denominator = v * t + (csp * t) ** 2
+
+            if np.any((denominator == 0) & (numerator > 0)):
+                raise ValueError("Nonzero signal requires positive noise variance.")
+
+            contributions = np.zeros_like(numerator)
+
+            np.divide(
+                numerator,
+                denominator,
+                out=contributions,
+                where=denominator > 0,
+            )
+
+            return np.sqrt(np.sum(contributions, axis=1))
+
+        # Smaller dMag corresponds to a brighter planet.
+        bright = np.full(n_targets, -40.0)
+        faint = np.full(n_targets, 80.0)
+
+        # Check whether the detection threshold is bracketed.
+        snr_bright = evaluate_snr(bright)
+        snr_faint = evaluate_snr(faint)
+
+        bracketed = valid & (snr_bright >= threshold) & (snr_faint <= threshold)
+
+        # Numerical inversion using bisection.
+        # Valid for planet-dependent photon shot noise.
+        for _ in range(50):
+            middle = 0.5 * (bright + faint)
+
+            snr_middle = evaluate_snr(middle)
+            detectable = snr_middle >= threshold
+
+            bright = np.where(
+                bracketed & detectable,
+                middle,
+                bright,
+            )
+
+            faint = np.where(
+                bracketed & ~detectable,
+                middle,
+                faint,
+            )
+
+        result = 0.5 * (bright + faint)
+
+        return np.where(bracketed, result, np.nan)
 
     def ddMag_dt(
         self,
@@ -1460,10 +1567,63 @@ class LIFEOpticalSystem(OpticalSystem):
         C_sp=None,
         TK=None,
     ):
-        """Reject the inherited reflected-light dMag derivative."""
-        raise NotImplementedError(
-            "LIFE ddMag_dt requires a thermal brightness convention."
+        """Calculate the derivative of limiting dMag with time.
+
+        Uses a centered finite difference of calc_dMag_per_intTime.
+
+        Returns:
+            astropy.units.Quantity:
+                d(dMag)/dt in 1/s.
+        """
+        if not isinstance(intTimes, u.Quantity):
+            raise TypeError("intTimes must be an Astropy Quantity.")
+
+        sInds = np.atleast_1d(sInds)
+
+        times = np.asarray(intTimes.to_value(u.s), dtype=float)
+
+        if times.ndim == 0:
+            times = np.full(len(sInds), float(times))
+        elif times.shape != (len(sInds),):
+            raise ValueError("Integration times must match target count.")
+
+        valid = np.isfinite(times) & (times > 0)
+        safe_times = np.where(valid, times, 1.0)
+
+        # Relative step of 0.1%.
+        dt = 1e-3 * safe_times
+
+        kwargs = {
+            "C_b": C_b,
+            "C_sp": C_sp,
+            "TK": TK,
+        }
+
+        dmag_plus = self.calc_dMag_per_intTime(
+            (safe_times + dt) * u.s,
+            TL,
+            sInds,
+            fZ,
+            JEZ,
+            WA,
+            mode,
+            **kwargs,
         )
+
+        dmag_minus = self.calc_dMag_per_intTime(
+            (safe_times - dt) * u.s,
+            TL,
+            sInds,
+            fZ,
+            JEZ,
+            WA,
+            mode,
+            **kwargs,
+        )
+
+        derivative = (dmag_plus - dmag_minus) / (2.0 * dt)
+
+        return np.where(valid, derivative, np.nan) / u.s
 
     def calc_saturation_dMag(self, TL, sInds, fZ, JEZ, WA, mode, TK=None):
         """Reject an unsupported coronagraphic saturation threshold."""
