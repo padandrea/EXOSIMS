@@ -1304,3 +1304,324 @@ def test_transmission_energy_conservation():
         right[:, 0, 0].value,
         atol=1e-14,
     )
+
+
+# Append to tests/OpticalSystem/test_LIFEOpticalSystem.py (no new repo file).
+# Uses the existing numpy/astropy/pytest imports and reference_collector_positions.
+
+
+def test_life_sun_earth_reference_benchmark():
+    """Check LIFE rates/SNR against the LIFEsimFT Sun-Earth reference.
+
+    Reference: padandrea/LIFEsimFT, reference.py and detectability.py.
+    This uses the reference's wavelength-bin convention (including its
+    last overshooting bin), to compare the same physical configuration.
+    """
+    from scipy.constants import au as au_si
+    from scipy.constants import c as c_si
+    from scipy.constants import h as h_si
+    from scipy.constants import k as k_si
+    from scipy.special import j0
+
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+    diameter = 3.0  # m, per collector
+    efficiency = 0.035  # overall photon-conversion efficiency
+    life.pupilArea = np.pi * (diameter / 2) ** 2 * u.m**2
+    mode = {
+        "attenuation": efficiency,
+        "inst": {"QE": lambda _lam: 1.0 / u.photon},
+    }
+
+    distance_m = (10 * u.pc).to_value(u.m)
+    star_radius_m = (1 * u.R_sun).to_value(u.m)
+    planet_radius_m = 6.3781e6
+
+    # LIFEsimFT reference uses edges growing by (1 + 1/R), with no
+    # truncation of the last bin. This differs slightly from the
+    # current LIFEOpticalSystem.get_spectral_bins() convention.
+    resolving_power = 10.0 / 0.3
+    n_bins = int(np.ceil(np.log(18.5 / 4.0) / np.log1p(1 / resolving_power)))
+    edges_m = 4e-6 * (1 + 1 / resolving_power) ** np.arange(n_bins + 1)
+    lam_m = (edges_m[:-1] + edges_m[1:]) / 2
+    widths_m = np.diff(edges_m)
+    wavelengths = lam_m * u.m
+    widths = widths_m * u.m
+
+    # 2325 samples over 15 complete rotations in LIFEsimFT are
+    # equivalent to 155 distinct equally weighted orientations.
+    angles = np.arange(155) * (2 * np.pi / 155) * u.rad
+    positions = reference_collector_positions(angles)
+    sky = np.array([au_si / distance_m, 0.0]) * u.rad
+
+    def blackbody_photon_flux(temperature_k, radius_m):
+        """Observed photon flux density of a uniform blackbody sphere."""
+        exponent = h_si * c_si / (lam_m * k_si * temperature_k)
+        values = (
+            2
+            * np.pi
+            * c_si
+            / lam_m**4
+            / np.expm1(exponent)
+            * (radius_m / distance_m) ** 2
+        )
+        return (values * u.photon / (u.s * u.m**2 * u.m)).to(
+            u.photon / (u.s * u.m**2 * u.um)
+        )
+
+    planet_flux = blackbody_photon_flux(254.0, planet_radius_m)
+    stellar_flux = blackbody_photon_flux(5778.0, star_radius_m)
+
+    planet_l, planet_r = life.get_planet_photon_rates(
+        positions, wavelengths, widths, sky, planet_flux, mode
+    )
+    star_l, star_r = life.get_stellar_leakage_rates(
+        positions,
+        wavelengths,
+        widths,
+        (star_radius_m / distance_m) * u.rad,
+        stellar_flux,
+        mode,
+    )
+
+    assert planet_l.shape == (155, 1, n_bins)
+    assert star_l.shape == (155, n_bins)
+
+    # Reference astrophysical backgrounds (LIFEsimFT sources.py).
+    # No atmospheric models or extra EXOSIMS source modules needed.
+    def planck_photon_radiance(lam, temperature_k):
+        return 2 * c_si / lam**4 / np.expm1(h_si * c_si / (lam * k_si * temperature_k))
+
+    one_collector_area = np.pi * (diameter / 2) ** 2
+    # Uniform disk brightness cancels the chopped mean but adds noise.
+    phase = np.arange(4) * np.pi / 2
+    weights = np.cos(phase[:, None] - phase[None, :])
+    collectors = positions[0].to_value(u.m)
+    baselines = np.linalg.norm(collectors[:, None, :] - collectors[None, :, :], axis=-1)
+
+    local_zodi_per_output = np.empty(n_bins)
+    exozodi_per_output = np.empty(n_bins)
+
+    zodi_lat = np.deg2rad(45.0)
+    cos_lat = np.cos(zodi_lat)
+    sin_lat = np.sin(zodi_lat)
+    solar_elongation = np.arccos(np.cos(0.75 * np.pi) * cos_lat)
+    dust_r_in = (278.3 / 1500.0) ** 2
+    dust_r_out = (278.3 / 88.0) ** 2
+
+    for i, (lam, band) in enumerate(zip(lam_m, widths_m)):
+        geometry = np.sqrt(
+            np.pi
+            / solar_elongation
+            / (sin_lat**2 + (0.6 * (lam / 11e-6) ** (-0.4) * cos_lat) ** 2)
+        )
+        local_radiance = (
+            4e-8
+            * (
+                planck_photon_radiance(lam, 265.0)
+                + 0.22 * (0.00465047 / 1.5) ** 2 * planck_photon_radiance(lam, 5777.0)
+            )
+            * geometry
+        )
+        fov_radius = lam / (2 * diameter)
+        omega = np.pi * fov_radius**2
+        local_zodi_per_output[i] = (
+            local_radiance * omega * band * one_collector_area * efficiency
+        )
+
+        # Face-on, one-zodi Kennedy et al. (2015) dust disk.
+        theta = np.linspace(dust_r_in * au_si / distance_m, fov_radius, 4000)
+        radius_au = theta * distance_m / au_si
+        inside = (radius_au >= dust_r_in) & (radius_au <= dust_r_out)
+        radius_safe = np.where(inside, radius_au, 1.0)
+        temperature = 278.3 / np.sqrt(radius_safe)
+        sigma = 7.12e-8 * radius_safe ** (-0.34)
+        radiance = np.where(
+            inside,
+            sigma * planck_photon_radiance(lam, temperature),
+            0.0,
+        )
+        visibility = np.trapezoid(
+            j0(2 * np.pi * baselines[:, :, None] * theta[None, None, :] / lam)
+            * radiance[None, None, :]
+            * (2 * np.pi * theta)[None, None, :],
+            theta,
+            axis=-1,
+        )
+        exozodi_per_output[i] = (
+            np.sum(weights * visibility) * band * one_collector_area * efficiency / 4
+        )
+
+    # Both phase-chopped outputs receive independent background noise.
+    n_rotations = len(angles)
+    lz_rate = np.broadcast_to(local_zodi_per_output, (n_rotations, n_bins)) / u.s
+    ez_rate = np.broadcast_to(exozodi_per_output, (n_rotations, n_bins)) / u.s
+
+    signal, variance = life.assemble_life_signal_noise(
+        planet_l,
+        planet_r,
+        star_l,
+        star_r,
+        background_rates=[(lz_rate, lz_rate), (ez_rate, ez_rate)],
+    )
+    snr_life = life.calc_life_snr(signal[0], variance[0], 16 * u.day)
+    time_life = life.calc_life_int_time(signal, variance, snr_threshold=5.0).to_value(
+        u.h
+    )[0]
+
+    # LIFEsimFT uses one mean noise rate per wavelength bin, whereas
+    # LIFEOpticalSystem uses per-rotation inverse-variance weighting.
+    chopped = (planet_l[:, 0, :] - planet_r[:, 0, :]).to_value(1 / u.s)
+    total_noise = (planet_l[:, 0, :] + planet_r[:, 0, :] + star_l + star_r).to_value(
+        1 / u.s
+    ) + 2 * (local_zodi_per_output + exozodi_per_output)[None, :]
+    snr_reference_statistic = np.sqrt(
+        (16 * u.day).to_value(u.s)
+        * np.sum(np.mean(chopped**2, axis=0) / np.mean(total_noise, axis=0))
+    )
+
+    print(f"Sun-Earth reference:  {snr_reference_statistic:.4f} SNR / 16 days")
+    print(f"EXOSIMS LIFE SNR:    {snr_life:.4f} / 16 days")
+    print(f"EXOSIMS LIFE t5:     {time_life:.4f} h")
+    print(f"Stellar leakage:     {star_l.to_value(1/u.s)[0].sum():.2f} 1/s")
+    print(f"Local zodi:          {local_zodi_per_output.sum():.2f} 1/s")
+    print(f"Exozodi:             {exozodi_per_output.sum():.2f} 1/s")
+
+    assert snr_reference_statistic == pytest.approx(42.18, abs=0.10)
+    assert snr_life == pytest.approx(42.18, abs=0.10)
+    assert time_life == pytest.approx(5.40, abs=0.05)
+    assert life.calc_life_snr(signal[0], variance[0], time_life * u.h) == pytest.approx(
+        5.0, abs=1e-10
+    )
+
+
+def test_life_sun_earth_local_zodi_map_10um():
+    """Check the sky-pixel background integrator with a physical FoV."""
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+    diameter = 3.0
+    efficiency = 0.035
+    life.pupilArea = np.pi * (diameter / 2) ** 2 * u.m**2
+    mode = {
+        "attenuation": efficiency,
+        "inst": {"QE": lambda _lam: 1.0 / u.photon},
+    }
+
+    lam = 10e-6
+    width = 0.3e-6
+    fov = lam / (2 * diameter)
+    n = 96
+    grid = (np.arange(n) + 0.5) * (2 * fov / n) - fov
+    xx, yy = np.meshgrid(grid, grid, indexing="ij")
+    sky = np.stack([xx.ravel(), yy.ravel()], axis=-1) * u.rad
+    solid_angle = np.full(n * n, (2 * fov / n) ** 2) * u.sr
+    within_fov = (xx.ravel() ** 2 + yy.ravel() ** 2) <= fov**2
+
+    from scipy.constants import c as c_si
+    from scipy.constants import h as h_si
+    from scipy.constants import k as k_si
+
+    def planck_photon_radiance(temp):
+        return 2 * c_si / lam**4 / np.expm1(h_si * c_si / (lam * k_si * temp))
+
+    cos_lat = np.cos(np.pi / 4)
+    sin_lat = np.sin(np.pi / 4)
+    elong = np.arccos(np.cos(0.75 * np.pi) * cos_lat)
+    geometry = np.sqrt(
+        np.pi / elong / (sin_lat**2 + (0.6 * (lam / 11e-6) ** (-0.4) * cos_lat) ** 2)
+    )
+    radiance_value = (
+        4e-8
+        * (
+            planck_photon_radiance(265.0)
+            + 0.22 * (0.00465047 / 1.5) ** 2 * planck_photon_radiance(5777.0)
+        )
+        * geometry
+    )
+    pixel_radiance = (radiance_value * within_fov[:, None]) * (
+        u.photon / (u.s * u.m**2 * u.m * u.sr)
+    )
+
+    left, right = life.get_extended_background_rates(
+        reference_collector_positions(np.array([0.0]) * u.rad),
+        np.array([lam]) * u.m,
+        np.array([width]) * u.m,
+        sky,
+        pixel_radiance,
+        solid_angle,
+        mode,
+    )
+    expected = (
+        radiance_value
+        * width
+        * np.pi
+        * fov**2
+        * np.pi
+        * (diameter / 2) ** 2
+        * efficiency
+    )
+    # Finite FoV of 96x96 pixels approximates the analytical foreground.
+    assert left.to_value(1 / u.s)[0, 0] == pytest.approx(expected, rel=0.08)
+    assert right.to_value(1 / u.s)[0, 0] == pytest.approx(expected, rel=0.08)
+
+    # The same spatial integrator should also accept a radial exozodi map.
+    from scipy.constants import au as au_si
+    from scipy.special import j0
+
+    distance_m = (10 * u.pc).to_value(u.m)
+    r_au = np.hypot(xx, yy).ravel() * distance_m / au_si
+    r_in = (278.3 / 1500.0) ** 2
+    r_out = (278.3 / 88.0) ** 2
+    inside = within_fov & (r_au >= r_in) & (r_au <= r_out)
+    r_safe = np.where(inside, r_au, 1.0)
+    dust_radiance = np.where(
+        inside,
+        7.12e-8 * r_safe ** (-0.34) * planck_photon_radiance(278.3 / np.sqrt(r_safe)),
+        0.0,
+    )
+    disk_map = dust_radiance[:, None] * (u.photon / (u.s * u.m**2 * u.m * u.sr))
+    ez_left, ez_right = life.get_extended_background_rates(
+        reference_collector_positions(np.array([0.0]) * u.rad),
+        np.array([lam]) * u.m,
+        np.array([width]) * u.m,
+        sky,
+        disk_map,
+        solid_angle,
+        mode,
+    )
+
+    # Independent radial Hankel transform of the same face-on dust disk.
+    theta = np.linspace(r_in * au_si / distance_m, fov, 4000)
+    radius_au = theta * distance_m / au_si
+    active = (radius_au >= r_in) & (radius_au <= r_out)
+    radius_safe = np.where(active, radius_au, 1.0)
+    disk_profile = np.where(
+        active,
+        7.12e-8
+        * radius_safe ** (-0.34)
+        * planck_photon_radiance(278.3 / np.sqrt(radius_safe)),
+        0.0,
+    )
+    collector_xy = reference_collector_positions(np.array([0.0]) * u.rad)[0].to_value(
+        u.m
+    )
+    baselines = np.linalg.norm(
+        collector_xy[:, None, :] - collector_xy[None, :, :], axis=-1
+    )
+    phase = np.arange(4) * np.pi / 2
+    weights = np.cos(phase[:, None] - phase[None, :])
+    visibility = np.trapezoid(
+        j0(2 * np.pi * baselines[:, :, None] * theta[None, None, :] / lam)
+        * disk_profile[None, None, :]
+        * (2 * np.pi * theta)[None, None, :],
+        theta,
+        axis=-1,
+    )
+    ez_expected = (
+        np.sum(weights * visibility)
+        / 4
+        * width
+        * np.pi
+        * (diameter / 2) ** 2
+        * efficiency
+    )
+    assert ez_left.to_value(1 / u.s)[0, 0] == pytest.approx(ez_expected, rel=0.08)
+    assert ez_right.to_value(1 / u.s)[0, 0] == pytest.approx(ez_expected, rel=0.08)
