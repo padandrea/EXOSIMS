@@ -8,6 +8,7 @@ import pytest
 
 from EXOSIMS.OpticalSystem.LIFEOpticalSystem import LIFEOpticalSystem
 from tests.TestSupport.Info import resource_path
+from EXOSIMS.ZodiacalLight.Mennesson import Mennesson
 
 
 def reference_collector_positions(rotation_angles):
@@ -1625,3 +1626,88 @@ def test_life_sun_earth_local_zodi_map_10um():
     )
     assert ez_left.to_value(1 / u.s)[0, 0] == pytest.approx(ez_expected, rel=0.08)
     assert ez_right.to_value(1 / u.s)[0, 0] == pytest.approx(ez_expected, rel=0.08)
+
+
+def test_life_mennesson_local_zodi_integration():
+    """Test the existing Mennesson local-zodi model with LIFE optics."""
+
+    # 1. Initialize the existing EXOSIMS zodiacal-light model.
+    zodi = Mennesson(verbose=False)
+
+    # 2. Set up the LIFE optical system.
+    life = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+    diameter = 3.0 * u.m
+    life.pupilArea = np.pi * (diameter / 2) ** 2
+
+    mode = {
+        "lam": 11.25 * u.um,
+        "deltaLam": 14.5 * u.um,
+        "attenuation": 0.035,
+        "inst": {
+            "name": "LIFE-spectrometer",
+            "Rs": 33.3,
+            "QE": lambda _lam: 1.0 / u.photon,
+        },
+    }
+
+    wavelengths, widths = life.get_spectral_bins_from_mode(mode)
+
+    # 3. Calculate zodiacal spectral radiance with Mennesson.
+    # Example sightline; real target geometry comes later.
+    lon = np.array([135.0]) * u.deg
+    lat = np.array([45.0]) * u.deg
+
+    I_ref = zodi.zodi_intensity_at_location(lon, lat, photon_units=True)[0]
+
+    color = zodi.zodi_color_correction_factor(wavelengths, photon_units=True)
+
+    I_photon = (I_ref * color).to(u.photon / (u.s * u.m**2 * u.um * u.sr))
+
+    assert I_photon.shape == wavelengths.shape
+    assert np.all(np.isfinite(I_photon.value))
+    assert np.all(I_photon.value > 0)
+
+    # 4. Construct a finite sky grid.
+    # Fixed reference FoV for this integration test.
+    fov = (10.0 * u.um / (2 * diameter)).to_value(u.dimensionless_unscaled)
+
+    n = 24
+    axis = (np.arange(n) + 0.5) * (2 * fov / n) - fov
+    xx, yy = np.meshgrid(axis, axis, indexing="ij")
+
+    sky_positions = np.stack([xx.ravel(), yy.ravel()], axis=-1) * u.rad
+
+    pixel_solid_angles = np.full(n * n, (2 * fov / n) ** 2) * u.sr
+
+    within_fov = xx.ravel() ** 2 + yy.ravel() ** 2 <= fov**2
+
+    # Local zodi is approximately uniform over the small field.
+    radiance_map = within_fov[:, None] * I_photon[None, :]
+
+    # 5. Obtain the reference LIFE collector geometry.
+    collector_positions = reference_collector_positions(np.array([0.0]) * u.rad)
+
+    # 6. Calculate left/right zodiacal photon rates.
+    C_z_left, C_z_right = life.get_extended_background_rates(
+        collector_positions,
+        wavelengths,
+        widths,
+        sky_positions,
+        radiance_map,
+        pixel_solid_angles,
+        mode,
+    )
+
+    # 7. Validate output shapes and physical behavior.
+    assert C_z_left.shape == (1, len(wavelengths))
+    assert C_z_right.shape == (1, len(wavelengths))
+
+    assert np.all(C_z_left > 0 / u.s)
+    assert np.all(C_z_right > 0 / u.s)
+
+    # Symmetric uniform emission produces equal mean rates.
+    np.testing.assert_allclose(
+        C_z_left.to_value(1 / u.s),
+        C_z_right.to_value(1 / u.s),
+        rtol=1e-2,
+    )
