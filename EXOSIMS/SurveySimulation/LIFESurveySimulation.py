@@ -255,3 +255,174 @@ class LIFESurveySimulation(SurveySimulation):
             "exozodi_left": exozodi_left,
             "exozodi_right": exozodi_right,
         }
+
+    def get_life_detection_metrics(
+        self,
+        *,
+        sInd: int,
+        wavelengths: u.Quantity,
+        bin_widths: u.Quantity,
+        planet_sky_positions: u.Quantity,
+        planet_spectral_fluxes: u.Quantity,
+        stellar_angular_radius: u.Quantity,
+        stellar_spectral_flux: u.Quantity,
+        sky_positions: u.Quantity,
+        pixel_solid_angles: u.Quantity,
+        rotation_angles: u.Quantity,
+        mode: dict,
+        local_zodi_longitude: u.Quantity,
+        local_zodi_latitude: u.Quantity,
+        integration_time: u.Quantity,
+        detector_pixels_per_output: float | np.ndarray,
+        nEZ: float | None = None,
+        nulling_baseline: u.Quantity | None = None,
+        rotation_fractions: np.ndarray | None = None,
+        snr_threshold: float | None = None,
+    ) -> dict:
+        """Assemble LIFE detection SNR and integration times for one star.
+
+        Planet spectra have shape (n_planets, n_wavelengths) and units
+        photon/(s m2 um); planet sky offsets have shape (n_planets, 2).
+        All spectra are flux densities at the observer, not surface fluxes.
+        The supplied total integration time is distributed over rotations.
+        Other planets contribute photon noise to each candidate detection.
+        This method does not generate spectra or propagate orbits.
+        """
+        if not isinstance(planet_sky_positions, u.Quantity):
+            raise TypeError("planet_sky_positions must be an Astropy Quantity.")
+        if not isinstance(planet_spectral_fluxes, u.Quantity):
+            raise TypeError("planet_spectral_fluxes must be an Astropy Quantity.")
+
+        planet_positions = np.atleast_2d(planet_sky_positions.to(u.rad))
+        planet_fluxes = np.atleast_2d(
+            planet_spectral_fluxes.to(u.photon / (u.s * u.m**2 * u.um))
+        )
+        n_wavelengths = np.atleast_1d(wavelengths).size
+        n_planets = planet_positions.shape[0]
+
+        if (
+            planet_positions.shape != (n_planets, 2)
+            or n_planets == 0
+            or planet_fluxes.shape != (n_planets, n_wavelengths)
+        ):
+            raise ValueError(
+                "Expected planet_sky_positions (n_planets, 2) and "
+                "planet_spectral_fluxes (n_planets, n_wavelengths), "
+                "with at least one planet."
+            )
+
+        optical_system = self.OpticalSystem
+        collector_positions = self.Observatory.get_collector_positions(
+            rotation_angles,
+            nulling_baseline=nulling_baseline,
+        )
+
+        # Each planet can have a different thermal spectrum.
+        planet_left_list = []
+        planet_right_list = []
+        for planet_index in range(n_planets):
+            left, right = optical_system.get_planet_photon_rates(
+                collector_positions,
+                wavelengths,
+                bin_widths,
+                planet_positions[planet_index],
+                planet_fluxes[planet_index],
+                mode,
+            )
+            planet_left_list.append(left)
+            planet_right_list.append(right)
+
+        # (n_rotations, n_planets, n_wavelengths)
+        planet_left = np.concatenate(planet_left_list, axis=1)
+        planet_right = np.concatenate(planet_right_list, axis=1)
+
+        stellar_left, stellar_right = optical_system.get_stellar_leakage_rates(
+            collector_positions,
+            wavelengths,
+            bin_widths,
+            stellar_angular_radius,
+            stellar_spectral_flux,
+            mode,
+        )
+
+        zodiacal_rates = self.get_life_zodiacal_rates(
+            sInd=sInd,
+            wavelengths=wavelengths,
+            bin_widths=bin_widths,
+            sky_positions=sky_positions,
+            pixel_solid_angles=pixel_solid_angles,
+            rotation_angles=rotation_angles,
+            mode=mode,
+            local_zodi_longitude=local_zodi_longitude,
+            local_zodi_latitude=local_zodi_latitude,
+            nEZ=nEZ,
+            nulling_baseline=nulling_baseline,
+        )
+
+        dark_rate, read_variance_rate = optical_system.get_detector_noise_rates(
+            wavelengths,
+            detector_pixels_per_output,
+            mode,
+        )
+
+        # Other planets also contribute photon shot noise. Assemble one
+        # detection candidate at a time so its companions enter only the
+        # variance, not the candidate's signal template.
+        signal_list = []
+        variance_list = []
+        for planet_index in range(n_planets):
+            background_rates = [
+                (zodiacal_rates["local_left"], zodiacal_rates["local_right"]),
+                (zodiacal_rates["exozodi_left"], zodiacal_rates["exozodi_right"]),
+            ]
+            if n_planets > 1:
+                other_planets = np.arange(n_planets) != planet_index
+                background_rates.append(
+                    (
+                        planet_left[:, other_planets, :].sum(axis=1),
+                        planet_right[:, other_planets, :].sum(axis=1),
+                    )
+                )
+
+            signal, variance = optical_system.assemble_life_signal_noise(
+                planet_left=planet_left[:, planet_index : planet_index + 1, :],
+                planet_right=planet_right[:, planet_index : planet_index + 1, :],
+                stellar_left=stellar_left,
+                stellar_right=stellar_right,
+                background_rates=background_rates,
+                detector_dark_rate=dark_rate,
+                detector_read_variance_rate=read_variance_rate,
+                rotation_fractions=rotation_fractions,
+            )
+            signal_list.append(signal)
+            variance_list.append(variance)
+
+        # One row per planet; columns are rotation-wavelength channels.
+        signal_rates = np.concatenate(signal_list, axis=0)
+        noise_variance_rates = np.concatenate(variance_list, axis=0)
+
+        threshold = mode["SNR"] if snr_threshold is None else snr_threshold
+        snr = optical_system.calc_life_snr(
+            signal_rates,
+            noise_variance_rates,
+            integration_time,
+        )
+        required_time = optical_system.calc_life_int_time(
+            signal_rates,
+            noise_variance_rates,
+            snr_threshold=threshold,
+        )
+
+        return {
+            "planet_left": planet_left,
+            "planet_right": planet_right,
+            "stellar_left": stellar_left,
+            "stellar_right": stellar_right,
+            **zodiacal_rates,
+            "detector_dark_rate": dark_rate,
+            "detector_read_variance_rate": read_variance_rate,
+            "signal_rates": signal_rates,
+            "noise_variance_rates": noise_variance_rates,
+            "snr": snr,
+            "required_integration_time": required_time,
+        }

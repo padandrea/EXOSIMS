@@ -253,3 +253,185 @@ def test_reject_invalid_star_index(survey, observation):
 
     with pytest.raises(ValueError, match="valid target"):
         survey.get_life_zodiacal_rates(**arguments)
+
+
+# ================================================================
+# LIFE spectral detection assembly
+# ================================================================
+
+
+class _DetectionGeometry:
+    def get_collector_positions(self, rotation_angles, *, nulling_baseline=None):
+        b = 14.5 if nulling_baseline is None else nulling_baseline.to_value(u.m)
+        p = np.array(
+            [
+                [-b / 2, -3 * b],
+                [-b / 2, 3 * b],
+                [b / 2, -3 * b],
+                [b / 2, 3 * b],
+            ]
+        )
+        a = np.atleast_1d(rotation_angles.to_value(u.rad))
+        c, s = np.cos(a)[:, None], np.sin(a)[:, None]
+        return (
+            np.stack(
+                (
+                    c * p[None, :, 0] - s * p[None, :, 1],
+                    s * p[None, :, 0] + c * p[None, :, 1],
+                ),
+                axis=-1,
+            )
+            * u.m
+        )
+
+
+def _detection_case(ez_scale=1.0):
+    survey = LIFESurveySimulation.__new__(LIFESurveySimulation)
+    survey.OpticalSystem = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+        scienceInstruments=[
+            {
+                "name": "LIFE-spectrometer",
+                "QE": 0.5,
+                "optics": 0.8,
+                "idark": 0.02,
+                "sread": 4.0,
+                "texp": 40.0,
+            }
+        ],
+        starlightSuppressionSystems=[{"name": "nuller", "lam": 10000, "optics": 0.75}],
+        observingModes=[
+            {
+                "instName": "LIFE-spectrometer",
+                "systName": "nuller",
+                "SNR": 5.0,
+                "LIFE_fov_taper": "gaussian",
+            }
+        ],
+    )
+    survey.Observatory = _DetectionGeometry()
+
+    def background_rates(**_):
+        return {
+            "local_left": np.array([[6.0, 8.0], [7.0, 9.0]]) / u.s,
+            "local_right": np.array([[5.0, 7.0], [6.0, 8.0]]) / u.s,
+            "exozodi_left": ez_scale * np.array([[4.0, 5.0], [6.0, 7.0]]) / u.s,
+            "exozodi_right": ez_scale * np.array([[3.0, 4.0], [5.0, 6.0]]) / u.s,
+        }
+
+    # Spatial dust integration is covered by separate existing tests.
+    survey.get_life_zodiacal_rates = background_rates
+
+    f = u.photon / (u.s * u.m**2 * u.um)
+    inputs = dict(
+        sInd=0,
+        wavelengths=np.array([10.0, 12.0]) * u.um,
+        bin_widths=np.array([0.3, 0.36]) * u.um,
+        planet_sky_positions=np.array([[100.0, 40.0], [-70.0, 85.0]]) * u.mas,
+        planet_spectral_fluxes=np.array([[200.0, 170.0], [90.0, 160.0]]) * f,
+        stellar_angular_radius=0.5 * u.mas,
+        stellar_spectral_flux=np.array([1e8, 8e7]) * f,
+        sky_positions=np.array([[0.0, 0.0], [10.0, 0.0]]) * u.mas,
+        pixel_solid_angles=np.array([1e-13, 1e-13]) * u.sr,
+        rotation_angles=np.array([0.0, 0.7]) * u.rad,
+        mode=survey.OpticalSystem.observingModes[0],
+        local_zodi_longitude=135.0 * u.deg,
+        local_zodi_latitude=30.0 * u.deg,
+        integration_time=600.0 * u.s,
+        detector_pixels_per_output=3.0,
+        nEZ=1.0,
+    )
+    return survey, inputs
+
+
+def test_life_detection_metrics_manual_photon_budget():
+    """Verify the assembled detection signal and photon-noise budget."""
+    survey, inputs = _detection_case()
+    result = survey.get_life_detection_metrics(**inputs)
+
+    def rate(key):
+        return result[key].to_value(1 / u.s)
+
+    assert result["signal_rates"].shape == (2, 4)
+    assert result["noise_variance_rates"].shape == (2, 4)
+
+    pl, pr = rate("planet_left"), rate("planet_right")
+
+    background = sum(
+        rate(key)
+        for key in (
+            "stellar_left",
+            "stellar_right",
+            "local_left",
+            "local_right",
+            "exozodi_left",
+            "exozodi_right",
+        )
+    )
+    detector = rate("detector_dark_rate") + rate("detector_read_variance_rate")
+    background += 2 * detector[None, :]
+
+    # Each candidate sees photon noise from ALL planets.
+    expected_signal = (0.5 * (pl - pr)).transpose(1, 0, 2).reshape(2, 4)
+
+    expected_variance = (
+        np.broadcast_to(
+            0.5 * ((pl + pr).sum(axis=1) + background)[:, None, :],
+            pl.shape,
+        )
+        .transpose(1, 0, 2)
+        .reshape(2, 4)
+    )
+
+    np.testing.assert_allclose(rate("signal_rates"), expected_signal)
+    np.testing.assert_allclose(rate("noise_variance_rates"), expected_variance)
+
+    information = np.sum(expected_signal**2 / expected_variance, axis=1)
+    np.testing.assert_allclose(result["snr"], np.sqrt(600 * information))
+    np.testing.assert_allclose(
+        result["required_integration_time"].to_value(u.s),
+        25 / information,
+    )
+
+
+def test_life_detection_companion_contributes_photon_noise():
+    """Verify that companion planets contribute additional photon noise."""
+    survey, inputs = _detection_case()
+    full = survey.get_life_detection_metrics(**inputs)
+
+    without = dict(inputs)
+    without["planet_spectral_fluxes"] = inputs["planet_spectral_fluxes"].copy()
+    without["planet_spectral_fluxes"][1] = 0 * u.photon / (u.s * u.m**2 * u.um)
+
+    no_companion = survey.get_life_detection_metrics(**without)
+
+    np.testing.assert_allclose(
+        full["signal_rates"][0].to_value(1 / u.s),
+        no_companion["signal_rates"][0].to_value(1 / u.s),
+    )
+    assert np.all(
+        full["noise_variance_rates"][0] > no_companion["noise_variance_rates"][0]
+    )
+
+def test_life_detection_more_exozodi_reduces_snr():
+    """Verify that increasing exozodi reduces SNR and increases detection time."""
+    low_sim, low_inputs = _detection_case(ez_scale=1.0)
+    high_sim, high_inputs = _detection_case(ez_scale=10.0)
+
+    low = low_sim.get_life_detection_metrics(**low_inputs)
+    high = high_sim.get_life_detection_metrics(**high_inputs)
+
+    assert np.all(high["snr"] < low["snr"])
+    assert np.all(high["required_integration_time"] > low["required_integration_time"])
+
+
+def test_life_detection_requires_one_spectrum_per_planet():
+    """Reject inconsistent planet spectrum dimensions."""
+    survey, inputs = _detection_case()
+    inputs["planet_spectral_fluxes"] = (
+        np.ones((2, 3)) * u.photon / (u.s * u.m**2 * u.um)
+    )
+
+    with pytest.raises(ValueError, match="planet_spectral_fluxes"):
+        survey.get_life_detection_metrics(**inputs)
