@@ -1711,3 +1711,320 @@ def test_life_mennesson_local_zodi_integration():
         C_z_right.to_value(1 / u.s),
         rtol=1e-2,
     )
+
+
+# ================================================================
+# LIFE Gaussian field-of-view tests
+# ================================================================
+
+
+def make_fov_test_optical_system():
+    """Construct a simple LIFE instrument for field-of-view tests."""
+    return LIFEOpticalSystem(
+        pupilDiam=2.0,
+        obscurFac=0.0,
+        scienceInstruments=[
+            {
+                "name": "LIFE-spectrometer",
+                "QE": 0.5,
+                "optics": 0.8,
+            }
+        ],
+        starlightSuppressionSystems=[
+            {
+                "name": "nuller",
+                "lam": 10000,
+                "optics": 0.75,
+            }
+        ],
+    )
+
+
+def test_fov_gaussian_on_axis_and_reference_scale():
+    """Check on-axis response and the LIFEsim Gaussian formula."""
+    life = make_fov_test_optical_system()
+
+    wavelength = 10.0 * u.um
+    diameter = life.pupilDiam
+
+    hfov = (wavelength / (2.0 * diameter)).to_value(u.dimensionless_unscaled) * u.rad
+
+    sky = (
+        np.array(
+            [
+                [0.0, 0.0],
+                [hfov.to_value(u.rad), 0.0],
+                [2.0 * hfov.to_value(u.rad), 0.0],
+            ]
+        )
+        * u.rad
+    )
+
+    attenuation = life.get_fov_attenuation(
+        wavelength,
+        sky,
+        fov_taper="gaussian",
+    )
+
+    assert attenuation.shape == (3, 1)
+
+    # At the field center, no attenuation.
+    assert attenuation[0, 0] == pytest.approx(1.0)
+
+    # At theta = hfov, G = exp(-(pi/4)^2).
+    assert attenuation[1, 0] == pytest.approx(np.exp(-((np.pi / 4.0) ** 2)))
+
+    # At theta = 2*hfov, G = exp(-(pi/2)^2).
+    assert attenuation[2, 0] == pytest.approx(np.exp(-((np.pi / 2.0) ** 2)))
+
+
+def test_fov_gaussian_wavelength_dependence():
+    """A longer wavelength produces a broader field of view."""
+    life = make_fov_test_optical_system()
+
+    wavelengths = np.array([10.0, 15.0]) * u.um
+    sky = np.array([200.0, 0.0]) * u.mas
+
+    attenuation = life.get_fov_attenuation(
+        wavelengths,
+        sky,
+        fov_taper="gaussian",
+    )
+
+    assert attenuation.shape == (1, 2)
+    assert attenuation[0, 0] < attenuation[0, 1]
+
+    assert np.all(attenuation > 0)
+    assert np.all(attenuation <= 1)
+
+
+def test_fov_none_is_identity():
+    """Turning off attenuation must recover the original model."""
+    life = make_fov_test_optical_system()
+
+    sky = np.array([[0.0, 0.0], [100.0, 50.0], [-200.0, 30.0]]) * u.mas
+
+    wavelengths = np.array([8.0, 10.0, 15.0]) * u.um
+
+    attenuation = life.get_fov_attenuation(
+        wavelengths,
+        sky,
+        fov_taper="none",
+    )
+
+    np.testing.assert_array_equal(
+        attenuation,
+        np.ones((3, 3)),
+    )
+
+
+def test_fov_transmission_scaling():
+    """Gaussian taper multiplies both outputs and the chopped map."""
+    life = make_fov_test_optical_system()
+
+    positions = reference_collector_positions(np.array([0.0, 0.7, 1.8]) * u.rad)
+
+    wavelengths = np.array([10.0, 15.0]) * u.um
+
+    sky = (
+        np.array(
+            [
+                [50.0, 20.0],
+                [120.0, 80.0],
+            ]
+        )
+        * u.mas
+    )
+
+    ideal = life.get_transmission(
+        positions,
+        wavelengths,
+        sky,
+        fov_taper="none",
+    )
+
+    gaussian = life.get_transmission(
+        positions,
+        wavelengths,
+        sky,
+        fov_taper="gaussian",
+    )
+
+    attenuation = life.get_fov_attenuation(
+        wavelengths,
+        sky,
+        fov_taper="gaussian",
+    )
+
+    for ideal_map, gaussian_map in zip(ideal, gaussian, strict=True):
+        np.testing.assert_allclose(
+            gaussian_map.value,
+            ideal_map.value * attenuation[None, :, :],
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+    np.testing.assert_allclose(
+        gaussian[2].value,
+        (gaussian[0] - gaussian[1]).value,
+        atol=1e-14,
+    )
+
+
+def test_fov_planet_photon_rate_scaling():
+    """Planet rates must inherit the field-of-view attenuation."""
+    life = make_fov_test_optical_system()
+
+    positions = reference_collector_positions(np.array([0.0]) * u.rad)
+
+    wavelengths = np.array([10.0, 15.0]) * u.um
+    widths = np.array([0.3, 0.45]) * u.um
+
+    sky = np.array([140.0, 80.0]) * u.mas
+
+    flux = np.array([100.0, 200.0]) * u.photon / (u.s * u.m**2 * u.um)
+
+    mode_none = {
+        **life.observingModes[0],
+        "LIFE_fov_taper": "none",
+    }
+
+    mode_gaussian = {
+        **life.observingModes[0],
+        "LIFE_fov_taper": "gaussian",
+    }
+
+    rates_none = life.get_planet_photon_rates(
+        positions, wavelengths, widths, sky, flux, mode_none
+    )
+
+    rates_gaussian = life.get_planet_photon_rates(
+        positions, wavelengths, widths, sky, flux, mode_gaussian
+    )
+
+    attenuation = life.get_fov_attenuation(wavelengths, sky, fov_taper="gaussian")
+
+    for original, tapered in zip(rates_none, rates_gaussian, strict=True):
+        np.testing.assert_allclose(
+            tapered.to_value(1 / u.s),
+            original.to_value(1 / u.s) * attenuation[None, :, :],
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+
+@pytest.mark.parametrize("background", ["local", "exozodi"])
+def test_fov_extended_background_scaling(background):
+    """Verify Gaussian attenuation of extended-background rates."""
+    life = make_fov_test_optical_system()
+
+    positions = reference_collector_positions(np.array([0.0, 0.7]) * u.rad)
+
+    wavelengths = np.array([10.0, 12.0]) * u.um
+    widths = np.array([0.3, 0.36]) * u.um
+
+    # All pixels have the same radial distance: 200 mas.
+    # Their Gaussian attenuation is therefore identical.
+    sky = (
+        np.array(
+            [
+                [120.0, 160.0],
+                [-120.0, 160.0],
+                [0.0, -200.0],
+            ]
+        )
+        * u.mas
+    )
+
+    if background == "local":
+        # Spatially uniform local zodiacal background.
+        values = np.ones((3, 2)) * 100.0
+    else:
+        # Spatially varying exozodiacal background.
+        values = np.array(
+            [
+                [100.0, 120.0],
+                [200.0, 250.0],
+                [150.0, 180.0],
+            ]
+        )
+
+    radiance = values * u.photon / (u.s * u.m**2 * u.um * u.sr)
+
+    solid_angles = np.full(3, 1.0e-12) * u.sr
+
+    mode_none = {
+        **life.observingModes[0],
+        "LIFE_fov_taper": "none",
+    }
+
+    mode_gaussian = {
+        **life.observingModes[0],
+        "LIFE_fov_taper": "gaussian",
+    }
+
+    rates_none = life.get_extended_background_rates(
+        positions,
+        wavelengths,
+        widths,
+        sky,
+        radiance,
+        solid_angles,
+        mode_none,
+    )
+
+    rates_gaussian = life.get_extended_background_rates(
+        positions,
+        wavelengths,
+        widths,
+        sky,
+        radiance,
+        solid_angles,
+        mode_gaussian,
+    )
+
+    attenuation = life.get_fov_attenuation(wavelengths, sky, fov_taper="gaussian")
+
+    # Equal-radius pixels have the same attenuation per channel.
+    np.testing.assert_allclose(
+        attenuation,
+        np.broadcast_to(attenuation[0], attenuation.shape),
+    )
+
+    for original, tapered in zip(rates_none, rates_gaussian, strict=True):
+        np.testing.assert_allclose(
+            tapered.to_value(1 / u.s),
+            original.to_value(1 / u.s) * attenuation[0][None, :],
+            rtol=1e-12,
+            atol=1e-14,
+        )
+
+
+def test_fov_rejects_invalid_model():
+    """Reject unknown field-of-view models."""
+    life = make_fov_test_optical_system()
+
+    with pytest.raises(ValueError, match="fov_taper"):
+        life.get_fov_attenuation(
+            10.0 * u.um,
+            np.array([0.0, 0.0]) * u.mas,
+            fov_taper="invalid",
+        )
+
+
+def test_fov_observing_mode_configuration():
+    """Verify Gaussian field-of-view selection via observing mode."""
+    life = LIFEOpticalSystem(
+        pupilDiam=2.0,
+        scienceInstruments=[{"name": "LIFE-spectrometer"}],
+        starlightSuppressionSystems=[{"name": "nuller", "lam": 10000}],
+        observingModes=[
+            {
+                "instName": "LIFE-spectrometer",
+                "systName": "nuller",
+                "LIFE_fov_taper": "gaussian",
+            }
+        ],
+    )
+
+    assert life.observingModes[0]["LIFE_fov_taper"] == "gaussian"

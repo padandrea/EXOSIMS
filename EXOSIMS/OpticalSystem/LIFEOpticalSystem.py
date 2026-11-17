@@ -72,6 +72,11 @@ class LIFEOpticalSystem(OpticalSystem):
                 for syst in self.starlightSuppressionSystems
                 if syst["name"] == mode["systName"]
             ][0]
+            # LIFE-specific field-of-view model.
+            mode["LIFE_fov_taper"] = mode.get("LIFE_fov_taper", "none")
+
+            if mode["LIFE_fov_taper"] not in ("none", "gaussian"):
+                raise ValueError("LIFE_fov_taper must be 'none' or 'gaussian'.")
 
             # start tracking allowed keywords
 
@@ -86,6 +91,7 @@ class LIFEOpticalSystem(OpticalSystem):
                 "BW",
                 "LIFE_lambda_min",
                 "LIFE_lambda_max",
+                "LIFE_fov_taper",
                 "bandpass_model",
                 "bandpass_step",
             ]
@@ -347,43 +353,133 @@ class LIFEOpticalSystem(OpticalSystem):
     # Stage 2 — Interferometry
     # ================================================================
 
+    def get_fov_attenuation(
+        self,
+        wavelengths: u.Quantity,
+        sky_positions: u.Quantity,
+        fov_taper: str = "none",
+    ) -> np.ndarray:
+        """Calculate the single-collector field-of-view intensity response.
+
+        The Gaussian model follows the LIFEsim convention:
+
+            hfov = wavelength / (2 * collector_diameter)
+            G = exp(-(pi * theta / (4 * hfov))**2)
+
+        Here theta is the radial angular separation from the pointing
+        center. The result is an intensity attenuation factor, not a
+        complex field-amplitude factor.
+
+        Args:
+            wavelengths (astropy.units.Quantity):
+                Scalar or 1D array of positive wavelengths.
+            sky_positions (astropy.units.Quantity):
+                Angular sky offsets, shape (2,) or (n_sky, 2).
+            fov_taper (str):
+                Either "none" or "gaussian".
+
+        Returns:
+            numpy.ndarray:
+                Dimensionless intensity factors, shape
+                (n_sky, n_wavelengths).
+        """
+        if fov_taper not in ("none", "gaussian"):
+            raise ValueError("fov_taper must be 'none' or 'gaussian'.")
+
+        if not isinstance(wavelengths, u.Quantity):
+            raise TypeError("wavelengths must be an Astropy Quantity.")
+
+        if not isinstance(sky_positions, u.Quantity):
+            raise TypeError("sky_positions must be an Astropy Quantity.")
+
+        try:
+            wavelength_m = np.atleast_1d(wavelengths.to_value(u.m))
+        except u.UnitConversionError as exc:
+            raise ValueError("wavelengths must have length units.") from exc
+
+        if (
+            wavelength_m.ndim != 1
+            or wavelength_m.size == 0
+            or not np.all(np.isfinite(wavelength_m))
+            or np.any(wavelength_m <= 0)
+        ):
+            raise ValueError("wavelengths must be finite, positive, and 1D.")
+
+        try:
+            theta = np.asarray(sky_positions.to_value(u.rad))
+        except u.UnitConversionError as exc:
+            raise ValueError("sky_positions must have angular units.") from exc
+
+        if theta.ndim == 1:
+            theta = theta[np.newaxis, :]
+
+        if (
+            theta.ndim != 2
+            or theta.shape[1] != 2
+            or theta.shape[0] == 0
+            or not np.all(np.isfinite(theta))
+        ):
+            raise ValueError("sky_positions must have shape (2,) " "or (n_sky, 2).")
+
+        n_sky = theta.shape[0]
+        n_wavelengths = wavelength_m.size
+
+        if fov_taper == "none":
+            return np.ones((n_sky, n_wavelengths))
+
+        # Diameter of ONE collector, not the interferometer baseline.
+        diameter_m = self.pupilDiam.to_value(u.m)
+
+        if np.ndim(diameter_m) != 0 or not np.isfinite(diameter_m) or diameter_m <= 0:
+            raise ValueError("pupilDiam must be finite and positive.")
+
+        # Radial angular distance from the pointing center.
+        theta_rad = np.linalg.norm(theta, axis=1)
+
+        # LIFEsim convention: wavelength-dependent half field of view.
+        hfov = wavelength_m[None, :] / (2.0 * diameter_m)
+
+        exponent = (np.pi * theta_rad[:, None] / (4.0 * hfov)) ** 2
+
+        return np.exp(-exponent)
+
     def get_transmission(
         self,
         collector_positions: u.Quantity,
         wavelengths: u.Quantity,
         sky_positions: u.Quantity,
+        *,
+        fov_taper: str = "none",
     ) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
-        """Calculate point-source transmission of the LIFE double Bracewell.
+        """Calculate LIFE double-Bracewell transmission.
 
-        The two chopped outputs use the quadrature phase shifts of the
-        double Bracewell beam combiner.
-        Transmission is normalized to the total collecting area of the
-        four telescopes, without throughput or photon-rate factors.
+        The ideal interferometric transmission is calculated from the
+        complex electric fields of the four collectors.
+
+        Optionally, the wavelength-dependent Gaussian single-collector
+        field-of-view intensity response is applied to both outputs.
 
         Args:
             collector_positions (astropy.units.Quantity):
-                Collector coordinates with shape (4, 2) or
-                (n_configurations, 4, 2), in length units.
-                Collector ordering must match the beam combiner.
-                Coordinates use the same sky axes as sky_positions.
+                Collector coordinates, shape (4, 2) or
+                (n_configurations, 4, 2).
             wavelengths (astropy.units.Quantity):
-                Scalar or 1D array of wavelengths with length units.
+                Scalar or 1D array of wavelengths.
             sky_positions (astropy.units.Quantity):
-                Angular offsets (theta_x, theta_y), shape (2,) or (n_sky, 2).
+                Angular offsets, shape (2,) or (n_sky, 2).
+            fov_taper (str):
+                "none" for ideal transmission or "gaussian"
+                for the LIFEsim-style field-of-view response.
 
         Returns:
-            tuple[astropy.units.Quantity, astropy.units.Quantity, astropy.units.Quantity]:
-                Left, right, and left-minus-right transmission, dimensionless.
-                Each has shape (n_configurations, n_sky, n_wavelengths).
-
-        Raises:
-            TypeError:
-                If an input is not an Astropy Quantity.
-            ValueError:
-                If input units, shapes, or values are invalid.
+            tuple[astropy.units.Quantity, ...]:
+                Left, right, and chopped-difference transmission.
+                Each has shape
+                (n_configurations, n_sky, n_wavelengths).
         """
         if not isinstance(wavelengths, u.Quantity):
             raise TypeError("wavelengths must be an Astropy Quantity.")
+
         if not isinstance(sky_positions, u.Quantity):
             raise TypeError("sky_positions must be an Astropy Quantity.")
 
@@ -438,25 +534,52 @@ class LIFEOpticalSystem(OpticalSystem):
                 "or (n_configurations, 4, 2), with finite values."
             )
 
-        # Remove the common optical phase using collector 0 as reference.
+        # Remove the common optical phase using collector 0.
         relative_positions = positions_m - positions_m[:, :1, :]
-        delays_m = np.einsum("rjc,sc->rsj", relative_positions, theta)
+
+        delays_m = np.einsum(
+            "rjc,sc->rsj",
+            relative_positions,
+            theta,
+        )
+
         geometric_phase = (
             2.0 * np.pi * delays_m[:, :, None, :] / wavelength_m[None, None, :, None]
         )
 
+        # Double-Bracewell beam-combiner phase conventions.
         phase_left = np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2])
         phase_right = np.array([0.0, 3 * np.pi / 2, np.pi, np.pi / 2])
 
         field_left = np.exp(1j * (geometric_phase + phase_left)).sum(axis=-1)
+
         field_right = np.exp(1j * (geometric_phase + phase_right)).sum(axis=-1)
 
-        # Division by 4**2 gives transmission relative to four collectors.
+        # Ideal intensity transmission, normalized to four collectors.
         left = np.abs(field_left) ** 2 / 16.0
         right = np.abs(field_right) ** 2 / 16.0
 
+        # Single-collector field-of-view intensity attenuation.
+        attenuation = self.get_fov_attenuation(
+            wavelengths,
+            sky_positions,
+            fov_taper=fov_taper,
+        )
+
+        # Broadcast (n_sky, n_wavelengths) over configurations.
+        left *= attenuation[None, :, :]
+        right *= attenuation[None, :, :]
+
+        # Chopped response is calculated AFTER attenuation.
+        chopped = left - right
+
         unit = u.dimensionless_unscaled
-        return left * unit, right * unit, (left - right) * unit
+
+        return (
+            left * unit,
+            right * unit,
+            chopped * unit,
+        )
 
     # ================================================================
     # Stage 3 — Photon rates
@@ -493,7 +616,10 @@ class LIFEOpticalSystem(OpticalSystem):
                 Shape: (n_configurations, n_sky, n_wavelengths).
         """
         left, right, _ = self.get_transmission(
-            collector_positions, wavelengths, sky_positions
+            collector_positions,
+            wavelengths,
+            sky_positions,
+            fov_taper=mode.get("LIFE_fov_taper", "none"),
         )
 
         flux = np.atleast_1d(planet_spectral_flux.to(u.photon / (u.s * u.m**2 * u.um)))
@@ -687,7 +813,10 @@ class LIFEOpticalSystem(OpticalSystem):
                 shape (n_configurations, n_wavelengths).
         """
         left, right, _ = self.get_transmission(
-            collector_positions, wavelengths, sky_positions
+            collector_positions,
+            wavelengths,
+            sky_positions,
+            fov_taper=mode.get("LIFE_fov_taper", "none"),
         )
 
         n_sky = left.shape[1]
