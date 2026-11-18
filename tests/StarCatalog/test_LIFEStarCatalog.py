@@ -80,9 +80,11 @@ class TestLIFEStarCatalog(unittest.TestCase):
             self.make_catalog()
 
     def test_rejects_missing_catalog_path(self):
-        """Reject a missing catalog path."""
-        with self.assertRaises(ValueError):
-            LIFEStarCatalog()
+        """Reject an explicitly supplied path that does not exist."""
+        missing_path = self.catalogpath.with_name("missing.csv")
+
+        with self.assertRaises(FileNotFoundError):
+            LIFEStarCatalog(catalogpath=missing_path)
 
 
 if __name__ == "__main__":

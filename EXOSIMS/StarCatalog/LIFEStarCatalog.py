@@ -5,7 +5,11 @@ LTC4 does not supply reliable optical V and B-V photometry; those fields
 remain NaN until a separate, documented photometric strategy is implemented.
 """
 
+import hashlib
+import os
+import tempfile
 from pathlib import Path
+from urllib.request import urlretrieve
 
 import astropy.units as u
 import numpy as np
@@ -14,14 +18,76 @@ from astropy.constants import L_sun, sigma_sb
 from astropy.coordinates import SkyCoord
 
 from EXOSIMS.Prototypes.StarCatalog import StarCatalog
+from EXOSIMS.util.get_dirs import get_downloads_dir
+
+# Fixed version of LTC4.csv from the official P-Pop repository.
+LTC4_COMMIT = "b2179f93952cf6a1e8c5845fdb040e8c98cf918b"
+
+LTC4_URL = (
+    "https://raw.githubusercontent.com/kammerje/P-pop/"
+    f"{LTC4_COMMIT}/P-pop/StarCatalogs/LTC4.csv"
+)
+
+LTC4_SHA256 = "d9dcbfbf5965a76f22a5980a3e883a91278c84bf35c20f468cfcfbd79e7318f2"
+
+
+def _sha256_file(path):
+    """Calculate the SHA-256 checksum of a file."""
+    digest = hashlib.sha256()
+
+    with Path(path).open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
+def _validate_pinned_csv(path):
+    """Verify that the catalog matches the pinned P-Pop version."""
+    if _sha256_file(path) != LTC4_SHA256:
+        raise ValueError(
+            f"LTC4 checksum mismatch: {path}. "
+            "The file differs from the pinned P-Pop version."
+        )
+
+
+def _default_catalog_path(downloadsdir=None):
+    """Download and cache LTC4, or reuse an existing verified copy."""
+    path = (
+        Path(get_downloads_dir(downloadsdir)) / "LIFE" / LTC4_COMMIT[:12] / "LTC4.csv"
+    )
+
+    if path.is_file():
+        _validate_pinned_csv(path)
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, temporary_name = tempfile.mkstemp(
+        prefix="LTC4-",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    os.close(fd)
+
+    temporary_path = Path(temporary_name)
+
+    try:
+        urlretrieve(LTC4_URL, str(temporary_path))
+        _validate_pinned_csv(temporary_path)
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+    return path
 
 
 class LIFEStarCatalog(StarCatalog):
     """Import all LTC4 stars into the EXOSIMS StarCatalog interface.
 
     Args:
-        catalogpath: Path to P-Pop's ``LTC4.csv``. Required explicitly to
-            avoid accidentally loading a different catalog version.
+        catalogpath: Optional path to an LTC4 CSV file. If omitted,
+            download and cache the pinned P-Pop catalog automatically.
         **specs: EXOSIMS StarCatalog options.
 
     Notes:
@@ -38,9 +104,9 @@ class LIFEStarCatalog(StarCatalog):
 
     def __init__(self, catalogpath=None, **specs):
         if catalogpath is None:
-            raise ValueError("Provide the path to LTC4.csv using catalogpath.")
-
-        path = Path(catalogpath).expanduser().resolve()
+            path = _default_catalog_path(specs.get("downloadsdir"))
+        else:
+            path = Path(catalogpath).expanduser().resolve()
         if not path.is_file():
             raise FileNotFoundError(f"LTC4 catalog not found: {path}")
 
@@ -71,6 +137,7 @@ class LIFEStarCatalog(StarCatalog):
 
         super().__init__(ntargs=n_stars, **specs)
         self._outspec["catalogpath"] = str(path)
+        self._outspec["catalog_sha256"] = _sha256_file(path)
         self.data = data
 
         def numeric(column):
