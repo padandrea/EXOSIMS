@@ -143,8 +143,8 @@ class LIFEStarCatalog(StarCatalog):
         def numeric(column):
             return pd.to_numeric(data[column], errors="coerce").to_numpy(dtype=float)
 
-        self.Name = data["main_id"].fillna("").astype(str).to_numpy()
-        self.Spec = data["sptype_string"].fillna("").astype(str).to_numpy()
+        self.Name = data["main_id"].fillna("").to_numpy(dtype=str)
+        self.Spec = data["sptype_string"].fillna("").to_numpy(dtype=str)
         self.dist = numeric("dist_st_value") * u.pc
         self.parx = numeric("plx_value") * u.mas
         self.Teff = numeric("teff") * u.K  # P-Pop uses 'teff', not 'teff_st_value'.

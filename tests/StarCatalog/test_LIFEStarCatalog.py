@@ -52,6 +52,8 @@ class TestLIFEStarCatalog(unittest.TestCase):
         self.assertEqual(catalog.ntargs, 2)
         self.assertEqual(list(catalog.Name), ["Sun test", "M dwarf test"])
         self.assertEqual(list(catalog.Spec), ["G2V", "M3V"])
+        self.assertTrue(np.issubdtype(catalog.Name.dtype, np.str_))
+        self.assertTrue(np.issubdtype(catalog.Spec.dtype, np.str_))
         np.testing.assert_allclose(catalog.dist.to_value(u.pc), [10.0, 20.0])
         np.testing.assert_allclose(catalog.coords.ra.to_value(u.deg), [10.0, 75.0])
 
