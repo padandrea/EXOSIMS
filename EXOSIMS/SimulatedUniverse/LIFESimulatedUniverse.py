@@ -4,6 +4,8 @@ import csv
 from pathlib import Path
 
 import astropy.units as u
+from astropy.constants import G
+from keplertools.keplerSTM import planSys
 import numpy as np
 
 from EXOSIMS.Prototypes.SimulatedUniverse import SimulatedUniverse
@@ -187,9 +189,281 @@ class LIFESimulatedUniverse(SimulatedUniverse):
             "planet_sky_positions": sky_positions,
         }
 
+    @staticmethod
+    def _orbital_basis(inclination, ascending_node, periapsis):
+        """Return the inertial periapsis and transverse unit vectors."""
+        ci, si = np.cos(inclination), np.sin(inclination)
+        co, so = np.cos(ascending_node), np.sin(ascending_node)
+        cw, sw = np.cos(periapsis), np.sin(periapsis)
+
+        p = np.column_stack((co * cw - so * sw * ci, so * cw + co * sw * ci, sw * si))
+        q = np.column_stack((-co * sw - so * cw * ci, -so * sw + co * cw * ci, cw * si))
+        return p, q
+
     def gen_physical_properties(self, **specs):
-        """Block random prototype planets until catalog loading is wired."""
-        raise NotImplementedError(
-            "LIFESimulatedUniverse must initialize planets from a P-Pop "
-            "catalog. The full EXOSIMS initialization is not yet implemented."
+        """Populate EXOSIMS planet attributes from one fixed P-Pop universe."""
+        path = specs.get("ppop_catalog")
+        uid = specs.get("ppop_universe_id")
+
+        if path is None or uid is None:
+            raise ValueError("ppop_catalog and ppop_universe_id are required.")
+
+        if (
+            self.Min is not None
+            or self.commonSystemPlane
+            or self.fixedPlanPerStar is not None
+            or self.fixed_nEZ_val is not None
+        ):
+            raise ValueError(
+                "P-Pop planets cannot be combined with resampling options."
+            )
+
+        data = self.load_ppop_universe(
+            path,
+            uid,
+            total_universes=specs.get("ppop_total_universes"),
         )
+
+        # Map P-Pop stars by identifier rather than assuming original
+        # Nstar indices survived EXOSIMS TargetList filtering.
+        target_names = [
+            "".join(str(name).split()).casefold() for name in self.TargetList.Name
+        ]
+
+        if len(set(target_names)) != len(target_names):
+            raise ValueError("TargetList contains ambiguous normalized star names.")
+
+        lookup = {name: index for index, name in enumerate(target_names)}
+        source_to_name = {}
+        name_to_source = {}
+        indices = []
+
+        for source, name in zip(data["Nstar"], data["name"]):
+            key = "".join(str(name).split()).casefold()
+            source = int(source)
+
+            if source in source_to_name and source_to_name[source] != key:
+                raise ValueError("One P-Pop star index maps to multiple names.")
+            if key in name_to_source and name_to_source[key] != source:
+                raise ValueError("One P-Pop star name maps to multiple indices.")
+
+            source_to_name[source] = key
+            name_to_source[key] = source
+
+            if key not in lookup:
+                raise ValueError(f"P-Pop host star {name!r} is absent from TargetList.")
+
+            indices.append(lookup[key])
+
+        self.plan2star = np.asarray(indices, dtype=int)
+
+        if self.plan2star.size:
+            catalog_dist = data["star_distance"].to_value(u.pc)
+            target_dist = self.TargetList.dist[self.plan2star].to_value(u.pc)
+
+            if not np.allclose(
+                catalog_dist,
+                target_dist,
+                rtol=1e-4,
+                atol=1e-4,
+            ):
+                raise ValueError("P-Pop and TargetList stellar distances disagree.")
+
+        # EXOSIMS planetary population attributes.
+        self.nPlans = len(self.plan2star)
+        self.sInds = np.unique(self.plan2star)
+
+        self.a = data["a"].copy()
+        self.e = data["e"].copy()
+        self.I = data["I"].copy()
+        self.O = data["O"].copy()
+        self.w = data["w"].copy()
+        self.Rp = data["Rp"].copy()
+        self.Mp = data["Mp"].copy()
+
+        # The conventional p attribute is visible geometric albedo.
+        # It must not be used as the planet's thermal Bond albedo.
+        self.p = data["p"].copy()
+        self.nEZ = data["nEZ"].copy()
+
+        # Additional LIFE-relevant properties from P-Pop.
+        self.Abond = data["Abond"].copy()
+        self.AgeomMIR = data["AgeomMIR"].copy()
+        self.Tp = data["Tp"].copy()
+        self.nu = data["nu"].copy()
+
+        # Preserve source quantities for traceability.
+        self.ppop_r_orbit = data["r_orbit"].copy()
+        self.ppop_ang_sep = data["AngSep"].copy()
+        self.ppop_nstar = data["Nstar"].copy()
+        self.ppop_star_name = data["name"].copy()
+
+        self.phiIndex = np.array([], dtype=int)
+
+        # Convert P-Pop true anomaly to EXOSIMS initial mean anomaly.
+        nu = self.nu.to_value(u.rad)
+        eccentric_anomaly = np.arctan2(
+            np.sqrt(1.0 - self.e**2) * np.sin(nu),
+            self.e + np.cos(nu),
+        )
+        self.M0 = (
+            np.mod(
+                eccentric_anomaly - self.e * np.sin(eccentric_anomaly),
+                2 * np.pi,
+            )
+            * u.rad
+        )
+
+        self._outspec["ppop_catalog"] = str(Path(path).expanduser().resolve())
+        self._outspec["ppop_universe_id"] = int(uid)
+        self._outspec["ppop_total_universes"] = specs.get("ppop_total_universes")
+
+        self.planet_atts.extend(
+            [
+                "Abond",
+                "AgeomMIR",
+                "Tp",
+                "nu",
+                "ppop_r_orbit",
+                "ppop_nstar",
+                "ppop_star_name",
+                "ppop_ang_sep",
+                "planet_sky_positions",
+            ]
+        )
+
+    def _update_life_geometry(self, pinds):
+        """Refresh orbital geometry without reflected-light photometry."""
+        if not len(pinds):
+            return
+
+        r = self.r[pinds].to_value(u.AU)
+
+        self.d[pinds] = np.linalg.norm(r, axis=1) * u.AU
+        self.s[pinds] = np.linalg.norm(r[:, :2], axis=1) * u.AU
+
+        ratio = self.r[pinds, :2] / self.TargetList.dist[self.plan2star[pinds], None]
+        self.planet_sky_positions[pinds] = ratio.decompose().value * u.rad
+
+        projected_ratio = (
+            (self.s[pinds] / self.TargetList.dist[self.plan2star[pinds]])
+            .decompose()
+            .value
+        )
+
+        self.WA[pinds] = (np.arctan(projected_ratio) * u.rad).to(u.arcsec)
+
+        p, q = self._orbital_basis(
+            self.I[pinds].to_value(u.rad),
+            self.O[pinds].to_value(u.rad),
+            self.w[pinds].to_value(u.rad),
+        )
+
+        self.nu[pinds] = (
+            np.mod(
+                np.arctan2(
+                    np.sum(r * q, axis=1),
+                    np.sum(r * p, axis=1),
+                ),
+                2 * np.pi,
+            )
+            * u.rad
+        )
+
+    def init_systems(self):
+        """Initialize 3D position and velocity from the P-Pop snapshot."""
+        n = self.nPlans
+        self.AU_div_day = u.AU / u.day
+        self.AU3_div_day2 = u.AU**3 / u.day**2
+
+        mu = G * (self.Mp + self.TargetList.MsTrue[self.plan2star])
+        self.mu_AU3_div_day2 = mu.to_value(self.AU3_div_day2)
+
+        nu = self.nu.to_value(u.rad)
+
+        p, q = self._orbital_basis(
+            self.I.to_value(u.rad),
+            self.O.to_value(u.rad),
+            self.w.to_value(u.rad),
+        )
+
+        direction = np.cos(nu)[:, None] * p + np.sin(nu)[:, None] * q
+
+        # Preserve P-Pop's original, rounded orbital radius.
+        self.r = self.ppop_r_orbit[:, None] * direction
+
+        speed = (mu / (self.a * (1 - self.e**2))) ** 0.5
+
+        self.v = (
+            speed[:, None]
+            * (-np.sin(nu)[:, None] * p + (self.e + np.cos(nu))[:, None] * q)
+        ).to(self.AU_div_day)
+
+        self.d = np.zeros(n) * u.AU
+        self.s = np.zeros(n) * u.AU
+        self.WA = np.zeros(n) * u.arcsec
+        self.planet_sky_positions = np.zeros((n, 2)) * u.rad
+
+        # Reflected-light quantities are deliberately unavailable.
+        self.dMag = np.full(n, np.nan)
+        self.phi = np.full(n, np.nan)
+
+        self._update_life_geometry(np.arange(n))
+
+        if not np.allclose(
+            self.WA.to_value(u.arcsec),
+            self.ppop_ang_sep.to_value(u.arcsec),
+            atol=3e-5,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                "Reconstructed orbital geometry disagrees with " "P-Pop AngSep."
+            )
+
+    def propag_system(self, sInd, dt):
+        """Propagate one planetary system using EXOSIMS's Kepler integrator."""
+        if not isinstance(sInd, (int, np.integer)) or isinstance(
+            sInd, (bool, np.bool_)
+        ):
+            raise TypeError("sInd must be a scalar star index.")
+
+        if sInd < 0 or sInd >= len(self.TargetList.Name):
+            raise ValueError("sInd is outside TargetList.")
+
+        if not isinstance(dt, u.Quantity):
+            raise TypeError("dt must have time units.")
+
+        days = np.asarray(dt.to_value(u.day), dtype=float)
+
+        if days.ndim != 0 or not np.isfinite(days) or days < 0:
+            raise ValueError("dt must be finite and nonnegative.")
+
+        pinds = np.flatnonzero(self.plan2star == sInd)
+
+        if len(pinds) == 0 or days == 0:
+            return
+
+        state = np.column_stack(
+            (
+                self.r[pinds].to_value(u.AU),
+                self.v[pinds].to_value(self.AU_div_day),
+            )
+        ).ravel()
+
+        mu = self.mu_AU3_div_day2[pinds]
+
+        integrator = planSys(state, mu, epsmult=10.0)
+
+        try:
+            integrator.takeStep(float(days))
+        except ValueError:
+            integrator = planSys(state, mu, epsmult=100.0)
+            integrator.takeStep(float(days) / 2)
+            integrator.takeStep(float(days) / 2)
+
+        evolved = np.asarray(integrator.x0).reshape(-1, 6)
+
+        self.r[pinds] = evolved[:, :3] * u.AU
+        self.v[pinds] = evolved[:, 3:] * self.AU_div_day
+
+        self._update_life_geometry(pinds)
