@@ -17,7 +17,9 @@ import astropy.units as u
 import numpy as np
 from astropy.constants import c, h
 from astropy.modeling.physical_models import BlackBody
+from unittest.mock import patch
 
+from EXOSIMS.Prototypes.TargetList import TargetList
 from EXOSIMS.TargetList.LIFETargetList import LIFETargetList
 
 
@@ -250,6 +252,32 @@ class TestLIFETargetList(unittest.TestCase):
         np.testing.assert_array_equal(actual_names, expected_names)
         self.assertTrue(missing_v)
         self.assertTrue(missing_bv)
+
+    def test_life_disables_legacy_filters_by_default(self):
+        """Disable inherited IWA and completeness filters, preserving others."""
+        with patch.object(TargetList, "__init__", return_value=None) as parent:
+            LIFETargetList(
+                optional_filters={
+                    "distance_filter": {
+                        "enabled": True,
+                        "params": {"max_distance": 20},
+                    }
+                }
+            )
+
+        filters = parent.call_args.kwargs["optional_filters"]
+
+        self.assertFalse(filters["outside_IWA_filter"]["enabled"])
+        self.assertFalse(filters["completeness_filter"]["enabled"])
+        self.assertTrue(filters["distance_filter"]["enabled"])
+        self.assertEqual(filters["distance_filter"]["params"]["max_distance"], 20)
+
+    def test_life_rejects_legacy_detection_filters(self):
+        """Reject unimplemented detection filters rather than silently using them."""
+        for name in ("outside_IWA_filter", "completeness_filter"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(NotImplementedError, name):
+                    LIFETargetList(optional_filters={name: {"enabled": True}})
 
 
 if __name__ == "__main__":

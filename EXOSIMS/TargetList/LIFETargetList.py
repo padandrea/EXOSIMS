@@ -21,6 +21,19 @@ class LIFETargetList(TargetList):
     observation and completeness interfaces replace reflected-light assumptions.
     """
 
+    def __init__(self, *args, optional_filters=None, **specs):
+        """Disable legacy detection filters until LIFE equivalents exist."""
+        filters = {} if optional_filters is None else dict(optional_filters)
+
+        for name in ("outside_IWA_filter", "completeness_filter"):
+            if filters.get(name, {}).get("enabled", False):
+                raise NotImplementedError(
+                    f"{name} requires a LIFE-specific implementation."
+                )
+            filters[name] = {"enabled": False}
+
+        super().__init__(*args, optional_filters=filters, **specs)
+
     def set_catalog_attributes(self):
         """Require LIFE physical inputs, not unavailable optical magnitudes."""
         self.catalog_atts = list(self.StarCatalog.catalog_atts)
