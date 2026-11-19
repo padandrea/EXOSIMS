@@ -81,6 +81,120 @@ class LIFECompleteness(Completeness):
         return seconds * u.s
 
     @staticmethod
+    def detection_times_from_survey(
+        survey, observing_inputs, universes, observation_time
+    ):
+        """Collect physical LIFE detection times across simulated universes.
+
+        observing_inputs contains the shared observing configuration for
+        one target star, excluding planet inputs and integration_time.
+
+        Each universe contains planet_sky_positions and
+        planet_spectral_fluxes, plus optional system-level nEZ.
+
+        Returns a Quantity of shape (n_universes, max_planets).
+        Missing or undetectable planets are represented by +inf.
+        """
+        if not callable(getattr(survey, "get_life_detection_metrics", None)):
+            raise TypeError("survey must provide get_life_detection_metrics.")
+
+        if not isinstance(observing_inputs, dict):
+            raise TypeError("observing_inputs must be a dictionary.")
+
+        if not isinstance(universes, (list, tuple)) or not universes:
+            raise ValueError("Provide at least one simulated universe.")
+
+        if not isinstance(observation_time, u.Quantity):
+            raise TypeError("observation_time must be a Quantity.")
+
+        budget = np.asarray(observation_time.to_value(u.s))
+        if budget.ndim != 0 or not np.isfinite(budget) or budget < 0:
+            raise ValueError("observation_time must be finite and nonnegative.")
+
+        forbidden = {
+            "planet_sky_positions",
+            "planet_spectral_fluxes",
+            "integration_time",
+        }
+        if forbidden.intersection(observing_inputs):
+            raise ValueError(
+                "Remove planet inputs and integration_time from observing_inputs."
+            )
+
+        wavelengths = observing_inputs.get("wavelengths")
+        if not isinstance(wavelengths, u.Quantity) or wavelengths.ndim != 1:
+            raise ValueError("observing_inputs requires a wavelength array.")
+        if wavelengths.size == 0:
+            raise ValueError("The wavelength array cannot be empty.")
+
+        flux_unit = u.photon / (u.s * u.m**2 * u.um)
+        rows = []
+
+        for universe in universes:
+            if not isinstance(universe, dict):
+                raise TypeError("Each universe must be a dictionary.")
+
+            allowed = {
+                "planet_sky_positions",
+                "planet_spectral_fluxes",
+                "nEZ",
+            }
+            if set(universe) - allowed:
+                raise ValueError("Unexpected universe input.")
+            if "nEZ" in universe and "nEZ" in observing_inputs:
+                raise ValueError("Specify nEZ in only one input dictionary.")
+
+            positions = universe.get("planet_sky_positions")
+            spectra = universe.get("planet_spectral_fluxes")
+
+            if not isinstance(positions, u.Quantity):
+                raise TypeError("Planet positions must be Quantities.")
+            if not isinstance(spectra, u.Quantity):
+                raise TypeError("Planet spectra must be Quantities.")
+
+            positions.to(u.rad)
+            spectra.to(flux_unit)
+
+            if positions.ndim != 2 or positions.shape[1] != 2:
+                raise ValueError("Planet positions must have shape (n_planets, 2).")
+
+            n_planets = positions.shape[0]
+            if spectra.shape != (n_planets, wavelengths.size):
+                raise ValueError(
+                    "Planet spectra must have shape (n_planets, n_wavelengths)."
+                )
+
+            if n_planets == 0:
+                rows.append(np.empty(0))
+                continue
+
+            result = survey.get_life_detection_metrics(
+                **observing_inputs,
+                **universe,
+                integration_time=observation_time,
+            )
+
+            times = result["required_integration_time"]
+            if not isinstance(times, u.Quantity):
+                raise TypeError("Survey detection times must be Quantities.")
+
+            values = np.asarray(times.to_value(u.s), dtype=float)
+            if values.shape != (n_planets,):
+                raise ValueError("Survey returned the wrong detection-time shape.")
+            if np.any(np.isneginf(values) | (values <= 0)):
+                raise ValueError("Survey returned invalid detection times.")
+
+            rows.append(np.where(np.isnan(values), np.inf, values))
+
+        max_planets = max(map(len, rows))
+        result = np.full((len(rows), max_planets), np.inf)
+
+        for index, values in enumerate(rows):
+            result[index, : len(values)] = values
+
+        return result * u.s
+
+    @staticmethod
     def detection_statistics(detection_times, observation_time):
         """Estimate LIFE detection statistics across simulated universes.
 

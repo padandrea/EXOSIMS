@@ -4,7 +4,9 @@ import unittest
 
 import astropy.units as u
 import numpy as np
+from unittest.mock import Mock
 
+from tests.SurveySimulation.test_LIFESurveySimulation import _detection_case
 from EXOSIMS.Completeness.LIFECompleteness import LIFECompleteness
 from EXOSIMS.Prototypes.Completeness import Completeness
 
@@ -209,6 +211,142 @@ class TestLIFECompleteness(unittest.TestCase):
             with self.subTest(method=method):
                 with self.assertRaises(NotImplementedError):
                     getattr(comp, method)(*args)
+
+    @staticmethod
+    def make_planet_universe(n_planets):
+        """Create correctly shaped synthetic planet inputs."""
+        return {
+            "planet_sky_positions": np.zeros((n_planets, 2)) * u.mas,
+            "planet_spectral_fluxes": (
+                np.ones((n_planets, 2)) * u.photon / (u.s * u.m**2 * u.um)
+            ),
+        }
+
+    def test_survey_detection_times_and_statistics(self):
+        """Combine variable planet counts across independent universes."""
+        survey = Mock()
+        survey.get_life_detection_metrics.side_effect = [
+            {"required_integration_time": np.array([1.0, np.nan]) * u.h},
+            {"required_integration_time": np.array([2.0]) * u.h},
+        ]
+
+        observing = {
+            "sInd": 0,
+            "wavelengths": np.array([10.0, 12.0]) * u.um,
+            "nEZ": 1.0,
+        }
+        universes = [
+            self.make_planet_universe(2),
+            self.make_planet_universe(1),
+            self.make_planet_universe(0),
+        ]
+
+        times = LIFECompleteness.detection_times_from_survey(
+            survey, observing, universes, 2 * u.h
+        )
+
+        self.assertEqual(times.shape, (3, 2))
+        np.testing.assert_allclose(
+            times.to_value(u.h),
+            [[1.0, np.inf], [2.0, np.inf], [np.inf, np.inf]],
+        )
+        self.assertEqual(survey.get_life_detection_metrics.call_count, 2)
+
+        for call in survey.get_life_detection_metrics.call_args_list:
+            self.assertEqual(call.kwargs["integration_time"].to_value(u.h), 2.0)
+
+        result = LIFECompleteness.detection_statistics(times, 2 * u.h)
+        self.assertAlmostEqual(result["expected_detections"], 2 / 3)
+        self.assertAlmostEqual(result["probability_at_least_one"], 2 / 3)
+
+    def test_all_universes_without_planets(self):
+        """Return an empty planet axis without running instrument physics."""
+        survey = Mock()
+        observing = {"wavelengths": np.array([10.0, 12.0]) * u.um}
+        universes = [
+            self.make_planet_universe(0),
+            self.make_planet_universe(0),
+        ]
+
+        times = LIFECompleteness.detection_times_from_survey(
+            survey, observing, universes, 1 * u.h
+        )
+
+        self.assertEqual(times.shape, (2, 0))
+        survey.get_life_detection_metrics.assert_not_called()
+
+    def test_invalid_survey_population(self):
+        """Reject absent universes and inconsistent spectral dimensions."""
+        survey = Mock()
+        observing = {"wavelengths": np.array([10.0, 12.0]) * u.um}
+
+        with self.assertRaises(ValueError):
+            LIFECompleteness.detection_times_from_survey(survey, observing, [], 1 * u.h)
+
+        invalid = self.make_planet_universe(1)
+        invalid["planet_spectral_fluxes"] = (
+            np.ones((1, 3)) * u.photon / (u.s * u.m**2 * u.um)
+        )
+
+        with self.assertRaisesRegex(ValueError, "Planet spectra"):
+            LIFECompleteness.detection_times_from_survey(
+                survey, observing, [invalid], 1 * u.h
+            )
+
+    def test_invalid_survey_detection_time(self):
+        """Reject invalid detection times returned by SurveySimulation."""
+        survey = Mock()
+        survey.get_life_detection_metrics.return_value = {
+            "required_integration_time": np.array([-1.0]) * u.s
+        }
+
+        observing = {"wavelengths": np.array([10.0, 12.0]) * u.um}
+
+        with self.assertRaisesRegex(ValueError, "invalid detection times"):
+            LIFECompleteness.detection_times_from_survey(
+                survey,
+                observing,
+                [self.make_planet_universe(1)],
+                1 * u.h,
+            )
+
+    def test_real_survey_detection_integration(self):
+        """Reuse the existing physical LIFE SurveySimulation test case."""
+        survey, inputs = _detection_case()
+
+        observation_time = inputs["integration_time"]
+        observing = {
+            key: value
+            for key, value in inputs.items()
+            if key
+            not in (
+                "integration_time",
+                "planet_sky_positions",
+                "planet_spectral_fluxes",
+            )
+        }
+        universe = {
+            "planet_sky_positions": inputs["planet_sky_positions"],
+            "planet_spectral_fluxes": inputs["planet_spectral_fluxes"],
+        }
+
+        actual = LIFECompleteness.detection_times_from_survey(
+            survey, observing, [universe], observation_time
+        )
+
+        expected = survey.get_life_detection_metrics(**inputs)[
+            "required_integration_time"
+        ]
+
+        self.assertEqual(actual.shape, (1, 2))
+        np.testing.assert_allclose(
+            actual[0].to_value(u.s),
+            np.where(
+                np.isnan(expected.to_value(u.s)),
+                np.inf,
+                expected.to_value(u.s),
+            ),
+        )
 
 
 if __name__ == "__main__":
