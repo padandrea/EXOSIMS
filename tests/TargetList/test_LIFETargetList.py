@@ -1,9 +1,9 @@
-"""Focused unittest checks for the LIFE TargetList blackbody implementation.
+"""Focused unittest checks for LIFE stellar properties and blackbody fluxes.
 
 Run from the root of EXOSIMS:
     python -m unittest discover -s tests/TargetList -p 'test_LIFETargetList.py' -v
 
-Optional cached-LTC4 photometry integration check:
+Optional cached-LTC4 physical-catalog integration check:
     LIFE_LTC4_INTEGRATION=1 python -m unittest discover -s tests/TargetList -p 'test_LIFETargetList.py' -v
 """
 
@@ -11,6 +11,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import astropy.units as u
 import numpy as np
@@ -21,7 +22,7 @@ from EXOSIMS.TargetList.LIFETargetList import LIFETargetList
 
 
 class TestLIFETargetList(unittest.TestCase):
-    """Unit tests for LIFE stellar blackbody flux calculations."""
+    """Unit tests for LIFE stellar fluxes and physical catalog properties."""
 
     @staticmethod
     def make_list():
@@ -43,6 +44,79 @@ class TestLIFETargetList(unittest.TestCase):
             "LIFE_lambda_max": upper_nm,
             "bandpass": lambda wavelength: np.ones(wavelength.size),
         }
+
+    def test_catalog_attributes_do_not_require_optical_photometry(self):
+        """Keep V-band fields optional and require physical LIFE inputs."""
+        tl = self.make_list()
+        tl.StarCatalog = SimpleNamespace(
+            catalog_atts=[
+                "Name",
+                "L",
+                "coords",
+                "dist",
+                "Binary_Cut",
+                "Teff",
+                "radius",
+                "mass",
+                "diameter",
+                "Vmag",
+                "BV",
+                "MV",
+                "BC",
+            ]
+        )
+        tl.set_catalog_attributes()
+        for name in ("Teff", "radius", "mass", "diameter"):
+            self.assertIn(name, tl.required_catalog_atts)
+        for name in ("Vmag", "BV", "MV", "BC"):
+            self.assertNotIn(name, tl.required_catalog_atts)
+            self.assertIn(name, tl.catalog_atts)
+
+    def test_missing_physical_catalog_attribute_raises(self):
+        """Reject a catalog missing essential LIFE physical properties."""
+        tl = self.make_list()
+        tl.StarCatalog = SimpleNamespace(
+            catalog_atts=[
+                "Name",
+                "L",
+                "coords",
+                "dist",
+                "Binary_Cut",
+                "Teff",
+                "radius",
+                "mass",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "diameter"):
+            tl.set_catalog_attributes()
+
+    def test_photometry_is_not_synthesized(self):
+        """Preserve missing optical magnitudes and source spectral labels."""
+        tl = self.make_list()
+        tl.fillPhotometry = False
+        tl.fillMissingBandMags = False
+        tl.Vmag = np.full(tl.nStars, np.nan)
+        tl.BV = np.full(tl.nStars, np.nan)
+        tl.Spec = np.array(["G2V", "M11", ""])
+        tl.fillPhotometryVals()
+        self.assertTrue(np.all(np.isnan(tl.Vmag)))
+        self.assertTrue(np.all(np.isnan(tl.BV)))
+        np.testing.assert_array_equal(tl.Spec, ["G2V", "M11", ""])
+
+        tl.fillPhotometry = True
+        with self.assertRaisesRegex(ValueError, "fillPhotometry=False"):
+            tl.fillPhotometryVals()
+
+    def test_catalog_stellar_mass_without_optical_magnitude(self):
+        """Use supplied LTC4 masses without stochastic V-band inference."""
+        tl = self.make_list()
+        tl.mass = np.array([1.0, 0.3, 1.4]) * u.Msun
+        tl.catalog_atts = ["mass"]
+        tl.stellar_mass()
+        np.testing.assert_allclose(tl.MsEst.to_value(u.Msun), [1.0, 0.3, 1.4])
+        np.testing.assert_allclose(tl.MsTrue.to_value(u.Msun), [1.0, 0.3, 1.4])
+        self.assertIn("MsEst", tl.catalog_atts)
+        self.assertIn("MsTrue", tl.catalog_atts)
 
     def test_monochromatic_flux_matches_astropy_blackbody(self):
         """Reference calculation via an independent Astropy BlackBody model."""
@@ -68,7 +142,7 @@ class TestLIFETargetList(unittest.TestCase):
         )
 
     def test_flux_scales_with_radius_squared(self):
-        """Verify flux scales with stellar radius squared."""
+        """Verify stellar photon flux scales with radius squared."""
         tl = self.make_list()
         flux = tl.starFlux(np.array([0, 1, 2]), self.flat_mode())
         self.assertTrue(flux.unit.is_equivalent(u.photon / (u.s * u.m**2)))
@@ -118,34 +192,36 @@ class TestLIFETargetList(unittest.TestCase):
         os.environ.get("LIFE_LTC4_INTEGRATION") == "1",
         "Set LIFE_LTC4_INTEGRATION=1 for cached LTC4 integration check",
     )
-    def test_ltc4_photometry_filter(self):
-        """Confirm legacy photometry temporarily removes 14 known LTC4 stars."""
-        expected = {
-            "SIPS J1514-2254",
-            "V* DY Psc",
-            "SSSPM J2356-3426",
-            "SIPS J2126-3143",
-            "LP  944-20",
-            "2MASSW J0149090+295613",
-            "2MASS J11592585-3634495",
-            "2MASSI J1743348+584411",
-            "SIPS J1019-2707",
-            "2MASS J22341394+2359559",
-            "2MASS J21330794+2321590",
-            "2MASS J15445518+3301447",
-            "2MASS J08111040+1855280",
-            "HD 222335",
-        }
+    def test_ltc4_physical_catalog_filter(self):
+        """Verify physical filtering does not require reconstructed V-band data."""
 
-        class StopAfterPhotometry(Exception):
-            pass
+        class StopAfterPhysicalFilter(Exception):
+            """Stop construction once the physical-property filter completes."""
 
         class CheckpointLIFETargetList(LIFETargetList):
+            """Inspect TargetList immediately after the physical-quantity filter."""
+
             def nan_filter(self):
-                before = set(map(str, self.Name))
+                """Record expected physically valid rows before filtering."""
+                before = self.nStars
+                valid = (
+                    (self.Name != "")
+                    & np.isfinite(self.L)
+                    & np.isfinite(self.dist.to_value(u.pc))
+                    & np.isfinite(self.Teff.to_value(u.K))
+                    & np.isfinite(self.radius.to_value(u.Rsun))
+                    & np.isfinite(self.mass.to_value(u.Msun))
+                    & np.isfinite(self.diameter.to_value(u.mas))
+                )
+                expected_names = self.Name[valid].copy()
                 super().nan_filter()
-                after = set(map(str, self.Name))
-                raise StopAfterPhotometry(before, after)
+                raise StopAfterPhysicalFilter(
+                    before,
+                    expected_names,
+                    self.Name.copy(),
+                    np.isnan(self.Vmag).all(),
+                    np.isnan(self.BV).all(),
+                )
 
         root = Path(__file__).resolve().parents[2]
         template = (
@@ -155,7 +231,7 @@ class TestLIFETargetList(unittest.TestCase):
         specs["modules"]["StarCatalog"] = "LIFEStarCatalog"
         specs["modules"]["TargetList"] = "LIFETargetList"
         specs.update(
-            fillPhotometry=True,
+            fillPhotometry=False,
             fillMissingBandMags=False,
             filterBinaries=False,
             verbose=False,
@@ -165,12 +241,15 @@ class TestLIFETargetList(unittest.TestCase):
                 "completeness_filter": {"enabled": False},
             },
         )
-        with self.assertRaises(StopAfterPhotometry) as captured:
+        with self.assertRaises(StopAfterPhysicalFilter) as captured:
             CheckpointLIFETargetList(**specs)
-        before, after = captured.exception.args
-        self.assertEqual(len(before), 3932)
-        self.assertEqual(before - after, expected)
-        self.assertEqual(len(after), 3918)
+        before, expected_names, actual_names, missing_v, missing_bv = (
+            captured.exception.args
+        )
+        self.assertEqual(before, 3932)
+        np.testing.assert_array_equal(actual_names, expected_names)
+        self.assertTrue(missing_v)
+        self.assertTrue(missing_bv)
 
 
 if __name__ == "__main__":

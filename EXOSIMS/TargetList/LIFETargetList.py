@@ -1,7 +1,8 @@
-"""LIFE-specific EXOSIMS target-list stellar fluxes.
+"""LIFE-specific EXOSIMS target-list inputs and stellar blackbody fluxes.
 
-This first implementation only replaces the stellar photon-flux calculation.
-It deliberately does not provide LIFE exozodi normalization or completeness.
+The LIFE catalog uses physical stellar properties without reconstructing
+optical photometry. The inherited exozodi/completeness initialization remains
+blocked until the LIFE observation and completeness interfaces are connected.
 """
 
 import astropy.units as u
@@ -13,27 +14,48 @@ from EXOSIMS.Prototypes.TargetList import TargetList
 
 
 class LIFETargetList(TargetList):
-    """TargetList using LTC4 temperatures, radii, and distances for stellar flux.
+    """TargetList using catalogued LTC4 physical stellar properties.
 
-    The inherited optical-photometry filter remains in effect for now. Thus,
-    initialize with ``fillPhotometry=True`` to retain the stars for which
-    conventional EXOSIMS can reconstruct Vmag, BV, MV, and BC.
-
-    Full TargetList construction is intentionally blocked at ``calc_all_JEZ0``
-    until LIFE-specific background and completeness interfaces are implemented.
+    No V-band photometry is fabricated, and stellar masses are taken from LTC4.
+    Full construction intentionally stops at ``calc_all_JEZ0`` until the LIFE
+    observation and completeness interfaces replace reflected-light assumptions.
     """
 
     def set_catalog_attributes(self):
-        """Require physical inputs in addition to the provisional legacy fields."""
-        super().set_catalog_attributes()
-        for attribute in ("Teff", "radius"):
-            if attribute not in self.required_catalog_atts:
-                self.required_catalog_atts.append(attribute)
+        """Require LIFE physical inputs, not unavailable optical magnitudes."""
+        self.catalog_atts = list(self.StarCatalog.catalog_atts)
+        self.required_catalog_atts = [
+            "Name",
+            "L",
+            "coords",
+            "dist",
+            "Binary_Cut",
+            "Teff",
+            "radius",
+            "mass",
+            "diameter",
+        ]
         missing = set(self.required_catalog_atts) - set(self.catalog_atts)
         if missing:
             raise ValueError(
                 f"LIFEStarCatalog is missing attributes: {sorted(missing)}"
             )
+
+    def fillPhotometryVals(self):
+        """Preserve catalog properties without synthesizing optical magnitudes."""
+        if self.fillPhotometry or self.fillMissingBandMags:
+            raise ValueError(
+                "LIFETargetList does not synthesize optical photometry. "
+                "Set fillPhotometry=False and fillMissingBandMags=False."
+            )
+
+    def stellar_mass(self):
+        """Use LTC4 stellar masses instead of a V-band mass-luminosity fit."""
+        self.MsEst = self.mass.to(u.Msun).copy()
+        self.MsTrue = self.MsEst.copy()
+        for name in ("MsEst", "MsTrue"):
+            if name not in self.catalog_atts:
+                self.catalog_atts.append(name)
 
     def genStarCatalogHex(self):
         """Separate LIFE blackbody caches from legacy optical-template caches."""
