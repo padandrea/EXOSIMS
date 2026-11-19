@@ -31,6 +31,99 @@ class TestLIFECompleteness(unittest.TestCase):
         self.assertTrue(issubclass(LIFECompleteness, Completeness))
         self.assertEqual(LIFECompleteness._modtype, "Completeness")
 
+    def test_detection_times_from_spectral_rates(self):
+        """Check integration times and downstream detection statistics."""
+        signal = (
+            np.array(
+                [
+                    [[5.0, 0.0], [0.0, 0.0], [1.0, -1.0]],
+                    [[0.0, 0.0], [2.0, 0.0], [0.0, 0.0]],
+                ]
+            )
+            / u.s
+        )
+        variance = np.ones((2, 3, 2)) / u.s
+
+        times = LIFECompleteness.detection_times_from_rates(
+            signal, variance, snr_threshold=5.0
+        )
+
+        self.assertEqual(times.shape, (2, 3))
+        self.assertTrue(times.unit.is_equivalent(u.s))
+
+        expected = np.array([[1.0, np.inf, 12.5], [np.inf, 6.25, np.inf]])
+        np.testing.assert_allclose(times.to_value(u.s), expected)
+
+        result = LIFECompleteness.detection_statistics(times, 2 * u.s)
+        self.assertAlmostEqual(result["expected_detections"], 0.5)
+        self.assertAlmostEqual(result["probability_at_least_one"], 0.5)
+
+    def test_signed_spectral_signals(self):
+        """Verify that positive and negative chopped signals do not cancel."""
+        signal = np.array([[[3.0, -3.0]]]) / u.s
+        variance = np.ones((1, 1, 2)) / u.s
+
+        times = LIFECompleteness.detection_times_from_rates(
+            signal, variance, snr_threshold=3.0
+        )
+
+        self.assertAlmostEqual(times[0, 0].to_value(u.s), 0.5)
+
+    def test_unreachable_systematic_floor(self):
+        """Represent an unreachable detection threshold with infinity."""
+        signal = np.ones((1, 1, 2)) / u.s
+        variance = np.ones((1, 1, 2)) / u.s
+        systematic = np.ones((1, 1, 2)) / u.s
+
+        times = LIFECompleteness.detection_times_from_rates(
+            signal,
+            variance,
+            snr_threshold=5.0,
+            systematic_rates=systematic,
+        )
+
+        self.assertTrue(np.isposinf(times[0, 0].value))
+
+    def test_empty_planet_slots_from_rates(self):
+        """Allow simulated universes containing no planetary slots."""
+        signal = np.empty((3, 0, 2)) / u.s
+        variance = np.empty((3, 0, 2)) / u.s
+
+        times = LIFECompleteness.detection_times_from_rates(
+            signal, variance, snr_threshold=5.0
+        )
+
+        self.assertEqual(times.shape, (3, 0))
+        result = LIFECompleteness.detection_statistics(times, 10 * u.h)
+        self.assertEqual(result["expected_detections"], 0.0)
+
+    def test_invalid_spectral_rate_inputs(self):
+        """Reject incorrect dimensions, units and noise-rate shapes."""
+        good_signal = np.ones((1, 1, 2)) / u.s
+        good_variance = np.ones((1, 1, 2)) / u.s
+
+        with self.assertRaises(TypeError):
+            LIFECompleteness.detection_times_from_rates(
+                good_signal.value, good_variance, 5.0
+            )
+
+        with self.assertRaises(ValueError):
+            LIFECompleteness.detection_times_from_rates(
+                np.ones((1, 2)) / u.s,
+                np.ones((1, 2)) / u.s,
+                5.0,
+            )
+
+        with self.assertRaises(ValueError):
+            LIFECompleteness.detection_times_from_rates(
+                good_signal,
+                np.ones((1, 1, 1)) / u.s,
+                5.0,
+            )
+
+        with self.assertRaises(ValueError):
+            LIFECompleteness.detection_times_from_rates(good_signal, good_variance, 0.0)
+
     def test_detection_statistics(self):
         """Distinguish expected yield and at-least-one probability."""
         result = LIFECompleteness.detection_statistics(self.times, 2 * u.h)

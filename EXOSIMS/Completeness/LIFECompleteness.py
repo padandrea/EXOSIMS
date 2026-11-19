@@ -4,6 +4,7 @@ import astropy.units as u
 import numpy as np
 
 from EXOSIMS.Prototypes.Completeness import Completeness
+from EXOSIMS.OpticalSystem.LIFEOpticalSystem import LIFEOpticalSystem
 
 
 class LIFECompleteness(Completeness):
@@ -15,6 +16,69 @@ class LIFECompleteness(Completeness):
     """
 
     _modtype = "Completeness"
+
+    @staticmethod
+    def detection_times_from_rates(
+        signal_rates,
+        noise_variance_rates,
+        snr_threshold,
+        systematic_rates=None,
+    ):
+        """Calculate planet detection times from LIFE spectral rates.
+
+        Parameters
+        ----------
+        signal_rates, noise_variance_rates : astropy.units.Quantity
+            Arrays of shape (n_universes, n_planet_slots, n_channels)
+            with units of 1/s. Channels may contain signed signals.
+        snr_threshold : float
+            Required detection SNR.
+        systematic_rates : astropy.units.Quantity, optional
+            Systematic noise amplitude rates, same shape and units.
+
+        Returns
+        -------
+        astropy.units.Quantity
+            Detection times with shape (n_universes, n_planet_slots).
+            Undetectable planets are represented by positive infinity.
+
+        Notes
+        -----
+        Each row represents one simulated universe for one target.
+        Photon rates must already include the appropriate LIFE
+        transmission, rotation, spectral and background calculations.
+        """
+        if not isinstance(signal_rates, u.Quantity):
+            raise TypeError("signal_rates must be an Astropy Quantity.")
+
+        if (
+            signal_rates.ndim != 3
+            or signal_rates.shape[0] == 0
+            or signal_rates.shape[2] == 0
+        ):
+            raise ValueError(
+                "signal_rates must have shape "
+                "(n_universes, n_planet_slots, n_channels), "
+                "with nonempty universe and channel axes."
+            )
+
+        required_times = LIFEOpticalSystem.calc_life_int_time(
+            signal_rates,
+            noise_variance_rates,
+            snr_threshold=snr_threshold,
+            systematic_rates=systematic_rates,
+        )
+
+        seconds = required_times.to_value(u.s)
+
+        if np.any(np.isinf(seconds)) or np.any(np.isfinite(seconds) & (seconds <= 0)):
+            raise ValueError("Instrument returned invalid detection times.")
+
+        # LIFEOpticalSystem returns NaN when SNR is unreachable.
+        # The Monte Carlo statistics use +inf for such planets.
+        seconds = np.where(np.isnan(seconds), np.inf, seconds)
+
+        return seconds * u.s
 
     @staticmethod
     def detection_statistics(detection_times, observation_time):
