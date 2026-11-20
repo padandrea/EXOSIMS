@@ -2123,6 +2123,71 @@ class TestLIFEOpticalSystem(unittest.TestCase):
 
         self.assertEqual(life.observingModes[0]["LIFE_fov_taper"], "gaussian")
 
+    def test_circular_fov_is_wavelength_dependent_for_backgrounds(self):
+        """A 640 mas dust patch is excluded at 8 um but included at 16 um."""
+        life = make_fov_test_optical_system()  # D = 2 m
+        positions = reference_collector_positions(np.array([0.3, 1.1]) * u.rad)
+        wavelengths = np.array([8.0, 16.0]) * u.um
+        widths = np.array([0.24, 0.48]) * u.um
+        sky = np.array([[500.0, 400.0]]) * u.mas
+        radiance = np.full((1, 2), 100.0) * u.photon / (
+            u.s * u.m**2 * u.um * u.sr
+        )
+        areas = np.array([1.0e-12]) * u.sr
+        square = {**life.observingModes[0], "LIFE_fov_boundary": "square"}
+        circle = {**square, "LIFE_fov_boundary": "circle"}
+        square_rates = life.get_extended_background_rates(
+            positions, wavelengths, widths, sky, radiance, areas, square
+        )
+        circle_rates = life.get_extended_background_rates(
+            positions, wavelengths, widths, sky, radiance, areas, circle
+        )
+        self.assertGreater(sum(np.sum(x.value) for x in square_rates), 0)
+        for unrestricted, restricted in zip(square_rates, circle_rates, strict=True):
+            np.testing.assert_allclose(restricted[:, 0].value, 0.0, atol=0.0)
+            np.testing.assert_allclose(
+                restricted[:, 1].to_value(1 / u.s),
+                unrestricted[:, 1].to_value(1 / u.s),
+                rtol=1e-12,
+                atol=1e-14,
+            )
+
+    def test_circular_fov_does_not_mask_planet_signal(self):
+        """The circle selects diffuse integration pixels, not point sources."""
+        life = make_fov_test_optical_system()
+        positions = reference_collector_positions(np.array([0.7]) * u.rad)
+        wavelengths = np.array([8.0, 16.0]) * u.um
+        widths = np.array([0.24, 0.48]) * u.um
+        sky = np.array([500.0, 400.0]) * u.mas
+        flux = np.array([100.0, 100.0]) * u.photon / (u.s * u.m**2 * u.um)
+        square = {**life.observingModes[0], "LIFE_fov_boundary": "square"}
+        circle = {**square, "LIFE_fov_boundary": "circle"}
+        standard = life.get_planet_photon_rates(
+            positions, wavelengths, widths, sky, flux, square
+        )
+        selected = life.get_planet_photon_rates(
+            positions, wavelengths, widths, sky, flux, circle
+        )
+        for original, actual in zip(standard, selected, strict=True):
+            np.testing.assert_array_equal(actual.value, original.value)
+
+    def test_fov_boundary_rejects_invalid_model(self):
+        """Invalid boundary choices must not silently revert to square."""
+        life = make_fov_test_optical_system()
+        positions = reference_collector_positions(np.array([0.7]) * u.rad)
+        wavelengths = np.array([10.0]) * u.um
+        widths = np.array([0.3]) * u.um
+        sky = np.array([[100.0, 0.0]]) * u.mas
+        radiance = np.full((1, 1), 100.0) * u.photon / (
+            u.s * u.m**2 * u.um * u.sr
+        )
+        with self.assertRaisesRegex(ValueError, "LIFE_fov_boundary"):
+            life.get_extended_background_rates(
+                positions, wavelengths, widths, sky, radiance,
+                np.array([1.0e-12]) * u.sr,
+                {**life.observingModes[0], "LIFE_fov_boundary": "hexagon"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

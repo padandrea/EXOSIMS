@@ -132,6 +132,61 @@ class TestLIFEZodiacalLight(unittest.TestCase):
 
         self.assertGreater(radiance.value[0, 0], 0)
 
+    def test_local_zodi_mennesson_preserves_existing_model(self):
+        """The new default must reproduce the inherited EXOSIMS spectrum."""
+        wavelengths = np.array([8.0, 10.0, 15.0]) * u.um
+        reference = self.zodi.zodi_intensity_at_location(
+            np.array([135.0]) * u.deg,
+            np.array([45.0]) * u.deg,
+            photon_units=True,
+        )[0] * self.zodi.zodi_color_correction_factor(
+            wavelengths, photon_units=True
+        )
+        actual = self.zodi.get_local_zodi_spectral_radiance(
+            wavelengths, 135 * u.deg, 45 * u.deg
+        )
+        np.testing.assert_allclose(actual.to_value(reference.unit), reference.value)
+
+    def test_local_zodi_darwinsim_independent_reference(self):
+        """Check LIFEsim's 265 K dust and scattered sunlight analytically."""
+        from scipy.constants import c as c_si, h as h_si, k as k_si
+
+        wavelength = 10.0e-6
+        lon, lat = np.deg2rad([135.0, 45.0])
+        thermal = lambda temp: (
+            2 * c_si / wavelength**4
+            / np.expm1(h_si * c_si / (wavelength * k_si * temp))
+            * 1.0e-6  # per metre -> per micrometre
+        )
+        geometry = np.sqrt(
+            np.pi / np.arccos(np.cos(lon) * np.cos(lat))
+            / (np.sin(lat) ** 2 + (0.6 * (10.0 / 11.0) ** (-0.4) * np.cos(lat)) ** 2)
+        )
+        expected = 4.0e-8 * geometry * (
+            thermal(265) + 0.22 * (0.00465047 / 1.5) ** 2 * thermal(5777)
+        )
+        actual = self.zodi.get_local_zodi_spectral_radiance(
+            np.array([10.0]) * u.um, 135 * u.deg, 45 * u.deg,
+            model="darwinsim",
+        )
+        self.assertEqual(actual.shape, (1,))
+        np.testing.assert_allclose(
+            actual.to_value(u.photon / (u.s * u.m**2 * u.um * u.sr))[0],
+            expected,
+            rtol=1e-12,
+        )
+
+    def test_local_zodi_invalid_model_and_solar_singularity(self):
+        """Reject invalid model selections and undefined solar geometry."""
+        with self.assertRaisesRegex(ValueError, "model"):
+            self.zodi.get_local_zodi_spectral_radiance(
+                10.0 * u.um, 135 * u.deg, 45 * u.deg, model="unknown"
+            )
+        with self.assertRaisesRegex(ValueError, "singular"):
+            self.zodi.get_local_zodi_spectral_radiance(
+                10.0 * u.um, 0 * u.deg, 0 * u.deg, model="darwinsim"
+            )
+
     def test_invalid_exozodi_level(self):
         """Reject negative exozodiacal dust levels."""
         with self.assertRaises(ValueError):

@@ -17,6 +17,90 @@ class LIFEZodiacalLight(Mennesson):
     of Kennedy et al. (2015).
     """
 
+    def get_local_zodi_spectral_radiance(
+        self,
+        wavelengths: u.Quantity,
+        longitude: u.Quantity,
+        latitude: u.Quantity,
+        model: str = "mennesson",
+    ) -> u.Quantity:
+        """Local-zodiacal photon spectral radiance at the observer.
+
+        The default reproduces the inherited EXOSIMS Mennesson/Leinert
+        model. The optional ``darwinsim`` model reproduces LIFEsim's
+        265 K dust + scattered-sunlight prescription, including its
+        wavelength-dependent ecliptic geometry factor. Unlike the
+        reference LIFEsim code, longitude is passed explicitly.
+        """
+        if model not in ("mennesson", "darwinsim"):
+            raise ValueError("model must be 'mennesson' or 'darwinsim'.")
+        if not all(
+            isinstance(value, u.Quantity)
+            for value in (wavelengths, longitude, latitude)
+        ):
+            raise TypeError("wavelengths, longitude, and latitude need units.")
+
+        wavelength = np.atleast_1d(wavelengths.to(u.m))
+        if (
+            wavelength.ndim != 1
+            or wavelength.size == 0
+            or not np.all(np.isfinite(wavelength.value))
+            or np.any(wavelength.value <= 0)
+        ):
+            raise ValueError("wavelengths must be finite and positive.")
+
+        lon = np.asarray(longitude.to_value(u.rad))
+        lat = np.asarray(latitude.to_value(u.rad))
+        if lon.ndim != 0 or lat.ndim != 0:
+            raise ValueError("Local-zodi longitude and latitude must be scalar.")
+        if not np.isfinite(lon) or not np.isfinite(lat):
+            raise ValueError("Local-zodi coordinates must be finite.")
+
+        radiance_unit = u.photon / (u.s * u.m**2 * u.um * u.sr)
+        if model == "mennesson":
+            reference = self.zodi_intensity_at_location(
+                np.atleast_1d(longitude.to(u.deg)),
+                np.atleast_1d(latitude.to(u.deg)),
+                photon_units=True,
+            )
+            color = self.zodi_color_correction_factor(
+                wavelength, photon_units=True
+            )
+            return (reference[0] * color).to(radiance_unit)
+
+        if abs(lat) > np.pi / 2:
+            raise ValueError("ecliptic latitude must be within [-90, 90] deg.")
+
+        # LIFEsim pn_localzodi.py: elongation angle and dust scale height.
+        cos_elongation = np.clip(np.cos(lon) * np.cos(lat), -1.0, 1.0)
+        elongation = np.arccos(cos_elongation)
+        if elongation <= 0:
+            raise ValueError("Darwinsim is singular toward the Sun.")
+
+        lambda_ratio = wavelength.to_value(u.um) / 11.0
+        geometry_denominator = (
+            np.sin(lat) ** 2
+            + (0.6 * lambda_ratio ** (-0.4) * np.cos(lat)) ** 2
+        )
+        geometry = np.sqrt(np.pi / elongation / geometry_denominator)
+
+        # Planck photon spectral radiance, in photons / (s m2 um sr).
+        def planck_photons(temperature: u.Quantity) -> u.Quantity:
+            exponent = (h * c / (wavelength * k_B * temperature)).decompose().value
+            with np.errstate(over="ignore"):
+                return (
+                    2.0 * c * u.photon
+                    / (wavelength**4 * u.sr * np.expm1(exponent))
+                ).to(radiance_unit)
+
+        thermal = planck_photons(265.0 * u.K)
+        scattered = (
+            0.22
+            * (0.00465047 / 1.5) ** 2
+            * planck_photons(5777.0 * u.K)
+        )
+        return (4.0e-8 * geometry * (thermal + scattered)).to(radiance_unit)
+
     def get_exozodi_spectral_radiance(
         self,
         sky_positions: u.Quantity,

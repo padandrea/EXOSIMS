@@ -517,6 +517,28 @@ class TestLIFESurveySimulation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "planet_spectral_fluxes"):
             survey.get_life_detection_metrics(**inputs)
 
+    def test_darwinsim_local_zodi_selection(self):
+        """The survey must forward local-zodiacal model choice."""
+        survey = make_survey()
+        parameters = make_observation()
+        default = survey.get_life_zodiacal_rates(**parameters)
+        parameters["mode"] = {
+            **parameters["mode"],
+            "LIFE_local_zodi_model": "darwinsim",
+        }
+        darwinsim = survey.get_life_zodiacal_rates(**parameters)
+        self.assertTrue(np.all(darwinsim["local_left"] > 0 / u.s))
+        self.assertTrue(np.all(darwinsim["local_right"] > 0 / u.s))
+        self.assertFalse(np.allclose(
+            default["local_left"].to_value(1 / u.s),
+            darwinsim["local_left"].to_value(1 / u.s),
+            rtol=1e-5, atol=1e-10,
+        ))
+        np.testing.assert_array_equal(
+            default["exozodi_left"].value,
+            darwinsim["exozodi_left"].value,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

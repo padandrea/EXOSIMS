@@ -78,6 +78,22 @@ class LIFEOpticalSystem(OpticalSystem):
             if mode["LIFE_fov_taper"] not in ("none", "gaussian"):
                 raise ValueError("LIFE_fov_taper must be 'none' or 'gaussian'.")
 
+            # Domain for integrating diffuse emission; distinct from the
+            # single-collector Gaussian transmission taper.
+            mode["LIFE_fov_boundary"] = mode.get("LIFE_fov_boundary", "square")
+            if mode["LIFE_fov_boundary"] not in ("square", "circle"):
+                raise ValueError("LIFE_fov_boundary must be 'square' or 'circle'.")
+
+            # Source selection belongs to ZodiacalLight; recording it here
+            # makes this optional keyword valid in EXOSIMS observing modes.
+            mode["LIFE_local_zodi_model"] = mode.get(
+                "LIFE_local_zodi_model", "mennesson"
+            )
+            if mode["LIFE_local_zodi_model"] not in ("mennesson", "darwinsim"):
+                raise ValueError(
+                    "LIFE_local_zodi_model must be 'mennesson' or 'darwinsim'."
+                )
+
             # start tracking allowed keywords
 
             self.allowed_observingMode_kws = [
@@ -92,6 +108,8 @@ class LIFEOpticalSystem(OpticalSystem):
                 "LIFE_lambda_min",
                 "LIFE_lambda_max",
                 "LIFE_fov_taper",
+                "LIFE_fov_boundary",
+                "LIFE_local_zodi_model",
                 "bandpass_model",
                 "bandpass_step",
             ]
@@ -862,6 +880,25 @@ class LIFEOpticalSystem(OpticalSystem):
             * mode["attenuation"]
             * qe
         ).to(1 / u.s)
+
+        # An optional, wavelength-dependent *integration domain* for
+        # spatially extended backgrounds. This is not a hard stop for
+        # point-source planets (LIFEsim applies its disk mask only when
+        # integrating diffuse emission with fov_taper='none').
+        boundary = mode.get("LIFE_fov_boundary", "square")
+        if boundary not in ("square", "circle"):
+            raise ValueError("LIFE_fov_boundary must be 'square' or 'circle'.")
+        if boundary == "circle":
+            # The caller must supply a grid wide enough to contain the
+            # largest circle, i.e. half_width >= max(lambda)/(2*D).
+            diameter = self.pupilDiam.to_value(u.m)
+            if not np.isfinite(diameter) or diameter <= 0:
+                raise ValueError("pupilDiam must be finite and positive.")
+            offsets = np.atleast_2d(sky_positions.to_value(u.rad))
+            theta = np.linalg.norm(offsets, axis=1)
+            radius = np.atleast_1d(wavelengths.to_value(u.m)) / (2.0 * diameter)
+            inside_circle = theta[:, None] <= radius[None, :]
+            patch_rates = patch_rates * inside_circle
 
         # Sum incoherent emission from all sky pixels.
         rate_left = (left * patch_rates[None, :, :]).sum(axis=1)

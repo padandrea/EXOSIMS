@@ -122,7 +122,7 @@ class LIFESurveySimulation(SurveySimulation):
 
         Notes:
             The exozodi is face-on and axisymmetric.
-            The local foreground uses the inherited Mennesson model.
+            The local foreground uses Mennesson by default, or Darwinsim.
             Optical field-of-view attenuation is not added here.
         """
         if (
@@ -181,31 +181,11 @@ class LIFESurveySimulation(SurveySimulation):
         # ---------------------------------------------------------
         # 4. Local-zodiacal spectral radiance
         # ---------------------------------------------------------
-        lon = np.atleast_1d(local_zodi_longitude.to(u.deg))
-        lat = np.atleast_1d(local_zodi_latitude.to(u.deg))
-
-        if lon.size != 1 or lat.size != 1:
-            raise ValueError("Local-zodi longitude and latitude must be scalar.")
-
-        if not np.all(np.isfinite(lon.value)) or not np.all(np.isfinite(lat.value)):
-            raise ValueError("Local-zodi coordinates must be finite.")
-
-        # Local zodiacal brightness at the reference wavelength.
-        local_reference = ZL.zodi_intensity_at_location(
-            lon,
-            lat,
-            photon_units=True,
-        )
-
-        # Convert the inherited local-zodi spectrum to the
-        # requested LIFE wavelength bins.
-        color_correction = ZL.zodi_color_correction_factor(
-            wavelengths,
-            photon_units=True,
-        )
-
-        local_spectrum = (local_reference[0] * color_correction).to(
-            u.photon / (u.s * u.m**2 * u.um * u.sr)
+        local_spectrum = ZL.get_local_zodi_spectral_radiance(
+            wavelengths=wavelengths,
+            longitude=local_zodi_longitude,
+            latitude=local_zodi_latitude,
+            model=mode.get("LIFE_local_zodi_model", "mennesson"),
         )
 
         # Local zodi is approximately uniform over the

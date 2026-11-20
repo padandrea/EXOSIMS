@@ -65,6 +65,8 @@ class TestLIFESunEarthComparison(unittest.TestCase):
             "attenuation": 0.05,
             "SNR": 5.0,
             "LIFE_fov_taper": "none",
+            "LIFE_fov_boundary": "circle",
+            "LIFE_local_zodi_model": "darwinsim",
             "inst": {
                 "QE": lambda _: 0.7 / u.photon,
                 "idark": 0.0 / u.s,
@@ -89,29 +91,6 @@ class TestLIFESunEarthComparison(unittest.TestCase):
                 cachedir=cachedir,
                 forceStaticEphem=True,
                 verbose=False,
-            )
-
-            # Reproduce LIFEsim's wavelength-dependent circular FoV.
-            # This wrapper affects only this test instance.
-            original_background_rates = optical.get_extended_background_rates
-
-            def circular_fov_background_rates(**kwargs):
-                theta = np.linalg.norm(
-                    kwargs["sky_positions"].to_value(u.rad), axis=1
-                )
-                fov_radius = (
-                    kwargs["wavelengths"].to_value(u.m)
-                    / (2.0 * optical.pupilDiam.to_value(u.m))
-                )
-                mask = theta[:, None] <= fov_radius[None, :]
-
-                kwargs["spectral_radiance"] = (
-                    kwargs["spectral_radiance"] * mask
-                )
-                return original_background_rates(**kwargs)
-
-            optical.get_extended_background_rates = (
-                circular_fov_background_rates
             )
 
             result = survey.get_life_detection_metrics(
@@ -145,49 +124,6 @@ class TestLIFESunEarthComparison(unittest.TestCase):
         snr = float(np.asarray(result["snr"]).item())
         time_h = float(
             result["required_integration_time"].to_value(u.h)[0]
-        )
-
-        # Diagnostic: wavelength-dependent circular LIFEsim field of view.
-        zodi = survey.ZodiacalLight
-        local_reference = zodi.zodi_intensity_at_location(
-            np.array([135.0]) * u.deg,
-            np.array([45.0]) * u.deg,
-            photon_units=True,
-        )[0]
-        local_color = zodi.zodi_color_correction_factor(
-            wavelengths, photon_units=True
-        )
-        local_spectrum = (local_reference * local_color).to(
-            u.photon / (u.s * u.m**2 * u.um * u.sr)
-        )
-
-        radial_offsets = np.linalg.norm(sky.to_value(u.rad), axis=1)
-        fov_radii = wavelengths.to_value(u.m) / (2.0 * 3.0)
-        circular_mask = radial_offsets[:, None] <= fov_radii[None, :]
-
-        masked_radiance = (
-            circular_mask * local_spectrum.value[None, :]
-        ) * local_spectrum.unit
-
-        positions = survey.Observatory.get_collector_positions(
-            rotation_angles, nulling_baseline=14.5 * u.m
-        )
-        circular_left, circular_right = optical.get_extended_background_rates(
-            collector_positions=positions,
-            wavelengths=wavelengths,
-            bin_widths=widths,
-            sky_positions=sky,
-            spectral_radiance=masked_radiance,
-            pixel_solid_angles=pixel_areas,
-            mode=mode,
-        )
-        circular_rate = (
-            0.5 * (circular_left + circular_right)
-        ).sum(axis=-1).mean()
-
-        print(
-            "Circular-FoV local zodi: "
-            f"{circular_rate.to_value(1 / u.s):.2f} 1/s"
         )
 
         for label, left_key, right_key in (
