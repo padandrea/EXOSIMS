@@ -202,3 +202,11 @@ class LIFETargetList(TargetList):
             "mid-IR background inputs. Stellar starFlux() is implemented "
             "and can be tested independently."
         )
+
+    def calc_saturation_and_intCutoff_vals(self):
+        """Prevent inherited reflected-light detection-limit calculations."""
+        raise NotImplementedError(
+            "LIFE-specific detection limits require observation-dependent "
+            "spectral signal and noise rates, not inherited reflected-light "
+            "saturation and dMag calculations."
+        )

@@ -190,6 +190,16 @@ class TestLIFETargetList(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "LIFE-specific exozodi"):
             tl.calc_all_JEZ0()
 
+    def test_legacy_detection_limits_are_blocked(self):
+        """Prevent inherited reflected-light detection-limit calculations."""
+        tl = self.make_list()
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "LIFE-specific detection limits",
+        ):
+            tl.calc_saturation_and_intCutoff_vals()
+
     @unittest.skipUnless(
         os.environ.get("LIFE_LTC4_INTEGRATION") == "1",
         "Set LIFE_LTC4_INTEGRATION=1 for cached LTC4 integration check",
@@ -278,6 +288,121 @@ class TestLIFETargetList(unittest.TestCase):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(NotImplementedError, name):
                     LIFETargetList(optional_filters={name: {"enabled": True}})
+
+    @unittest.skipUnless(
+        (
+            Path(__file__).resolve().parents[2]
+            / "EXOSIMS"
+            / "Completeness"
+            / "LIFECompleteness.py"
+        ).is_file(),
+        "Requires LIFECompleteness.py from feature/life-completeness",
+    )
+    @unittest.skipUnless(
+        os.environ.get("LIFE_LTC4_INTEGRATION") == "1",
+        "Set LIFE_LTC4_INTEGRATION=1 for cached LTC4 integration check",
+    )
+    def test_ltc4_reaches_exozodi_initialization(self):
+        """Test real LIFE modules up to the first unsupported interface."""
+
+        class ReachedExozodi(Exception):
+            """Expected checkpoint before exozodi initialization."""
+
+        class CheckpointTargetList(LIFETargetList):
+            """Inspect the physically initialized LIFE TargetList."""
+
+            def calc_all_JEZ0(self):
+                """Stop before inherited optical exozodi calculations."""
+
+                mode = self.filter_mode
+
+                flux = self.starFlux(
+                    np.arange(self.nStars),
+                    mode,
+                )
+
+                raise ReachedExozodi(
+                    self.nStars,
+                    self.MsTrue.copy(),
+                    flux.copy(),
+                    type(self.OpticalSystem).__name__,
+                    type(self.Completeness).__name__,
+                    mode["lam"].to(u.um),
+                )
+
+        root = Path(__file__).resolve().parents[2]
+
+        template = (
+            root / "tests" / "TestSupport" / "test-scripts" / "template_minimal.json"
+        )
+
+        specs = json.loads(template.read_text(encoding="utf-8"))
+
+        # Use the actual LIFE modules.
+        specs["modules"]["StarCatalog"] = "LIFEStarCatalog"
+        specs["modules"]["TargetList"] = "LIFETargetList"
+        specs["modules"]["OpticalSystem"] = "LIFEOpticalSystem"
+        specs["modules"]["Completeness"] = "LIFECompleteness"
+
+        # Configure a LIFE mid-infrared spectrometer.
+        specs["scienceInstruments"][0]["name"] = "LIFE-spectrometer"
+        specs["scienceInstruments"][0]["Rs"] = 33.3
+
+        specs["starlightSuppressionSystems"][0]["name"] = "nuller"
+
+        specs["observingModes"] = [
+            {
+                "instName": "LIFE-spectrometer",
+                "systName": "nuller",
+                "LIFE_lambda_min": 4000,
+                "LIFE_lambda_max": 18500,
+                "bandpass_model": "box",
+                "detectionMode": True,
+                "SNR": 5,
+            }
+        ]
+
+        specs.update(
+            fillPhotometry=False,
+            fillMissingBandMags=False,
+            filterBinaries=False,
+            verbose=False,
+            optional_filters={
+                "outside_IWA_filter": {"enabled": False},
+                "completeness_filter": {"enabled": False},
+            },
+        )
+
+        with self.assertRaises(ReachedExozodi) as captured:
+            CheckpointTargetList(**specs)
+
+        (
+            n_stars,
+            masses,
+            fluxes,
+            optical_name,
+            completeness_name,
+            central_wavelength,
+        ) = captured.exception.args
+
+        # Verify the actual LIFE implementations were loaded.
+        self.assertEqual(optical_name, "LIFEOpticalSystem")
+        self.assertEqual(completeness_name, "LIFECompleteness")
+
+        # Verify stellar properties survived initialization.
+        self.assertGreater(n_stars, 0)
+        self.assertEqual(len(masses), n_stars)
+        self.assertEqual(len(fluxes), n_stars)
+
+        self.assertTrue(np.all(np.isfinite(masses.value)))
+        self.assertTrue(np.all(np.isfinite(fluxes.value)))
+        self.assertTrue(np.all(fluxes.value > 0))
+
+        # Central wavelength: (4 + 18.5) / 2 = 11.25 um.
+        self.assertAlmostEqual(
+            central_wavelength.to_value(u.um),
+            11.25,
+        )
 
 
 if __name__ == "__main__":
