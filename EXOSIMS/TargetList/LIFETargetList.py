@@ -13,6 +13,10 @@ from scipy.integrate import trapezoid
 from EXOSIMS.Prototypes.TargetList import TargetList
 
 
+class _CatalogOnlyReady(Exception):
+    """Signal completion of physical stellar initialization."""
+
+
 class LIFETargetList(TargetList):
     """TargetList using catalogued LTC4 physical stellar properties.
 
@@ -21,8 +25,8 @@ class LIFETargetList(TargetList):
     observation and completeness interfaces replace reflected-light assumptions.
     """
 
-    def __init__(self, *args, optional_filters=None, **specs):
-        """Disable legacy detection filters until LIFE equivalents exist."""
+    def __init__(self, *args, optional_filters=None, catalog_only=False, **specs):
+        """Initialize LIFE stellar properties without legacy detection physics."""
         filters = {} if optional_filters is None else dict(optional_filters)
 
         for name in ("outside_IWA_filter", "completeness_filter"):
@@ -32,7 +36,44 @@ class LIFETargetList(TargetList):
                 )
             filters[name] = {"enabled": False}
 
-        super().__init__(*args, optional_filters=filters, **specs)
+        if catalog_only:
+            if specs.get("filterBinaries", True):
+                raise ValueError("catalog_only requires filterBinaries=False.")
+
+            active = [
+                name for name, config in filters.items() if config.get("enabled", False)
+            ]
+            if active:
+                raise ValueError(
+                    f"catalog_only does not support active filters: {active}"
+                )
+
+            if (
+                specs.get("getKnownPlanets", False)
+                or specs.get("filter_for_char", False)
+                or specs.get("earths_only", False)
+            ):
+                raise ValueError(
+                    "catalog_only does not support known-planet queries "
+                    "or characterization filtering."
+                )
+
+        self._catalog_only = bool(catalog_only)
+
+        try:
+            super().__init__(
+                *args,
+                optional_filters=filters,
+                **specs,
+            )
+        except _CatalogOnlyReady:
+            if not self._catalog_only:
+                raise
+
+            self.hasKnownPlanet = np.zeros(self.nStars, dtype=bool)
+            self.catalog_atts.append("hasKnownPlanet")
+            self._outspec["nStars"] = self.nStars
+            self._outspec["catalog_only"] = True
 
     def set_catalog_attributes(self):
         """Require LIFE physical inputs, not unavailable optical magnitudes."""
@@ -195,6 +236,8 @@ class LIFETargetList(TargetList):
 
     def calc_all_JEZ0(self):
         """Prevent the inherited visible-light exozodi prescription being used."""
+        if getattr(self, "_catalog_only", False):
+            raise _CatalogOnlyReady()
         raise NotImplementedError(
             "LIFETargetList requires a LIFE-specific exozodi/completeness "
             "interface. The inherited TargetList.calc_all_JEZ0 uses "

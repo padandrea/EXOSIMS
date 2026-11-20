@@ -405,5 +405,40 @@ class TestLIFETargetList(unittest.TestCase):
         )
 
 
+    @unittest.skipUnless(
+        os.environ.get("LIFE_LTC4_INTEGRATION") == "1",
+        "Requires cached LTC4 catalog",
+    )
+    def test_catalog_only_initialization(self):
+        """Initialize physical stellar data without observation-dependent calculations."""
+        root = Path(__file__).resolve().parents[2]
+        template = (
+            root / "tests" / "TestSupport"
+            / "test-scripts" / "template_minimal.json"
+        )
+        specs = json.loads(template.read_text(encoding="utf-8"))
+
+        specs["modules"]["StarCatalog"] = "LIFEStarCatalog"
+        specs["modules"]["TargetList"] = "LIFETargetList"
+
+        specs.update(
+            catalog_only=True,
+            fillPhotometry=False,
+            fillMissingBandMags=False,
+            filterBinaries=False,
+            verbose=False,
+            optional_filters={
+                "binary_filter": {"enabled": False},
+            },
+        )
+
+        tl = LIFETargetList(**specs)
+
+        self.assertGreater(tl.nStars, 0)
+        self.assertEqual(len(tl.Teff), tl.nStars)
+        self.assertEqual(len(tl.MsTrue), tl.nStars)
+        self.assertFalse(hasattr(tl, "int_comp"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
