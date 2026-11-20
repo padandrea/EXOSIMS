@@ -1,0 +1,42 @@
+{
+  "reference": {
+    "repository": "fdannert/LIFEsim",
+    "branch": "multiprocessing_v2",
+    "commit": "b8f41c170ddbc41283cd464afb985c219f4f3955",
+    "method": "Instrument.get_spectrum"
+  },
+  "star": {
+    "temperature_K": 5778.0,
+    "radius_Rsun": 1.0,
+    "distance_pc": 10.0,
+    "ecliptic_latitude_deg": 45.0
+  },
+  "planet": {
+    "temperature_K": 254.0,
+    "radius_m": 6378100.0,
+    "angular_separation_arcsec": 0.1,
+    "spectrum": "blackbody"
+  },
+  "instrument": {
+    "collector_diameter_m": 3.0,
+    "nulling_baseline_m": 14.5,
+    "baseline_ratio": 6.0,
+    "wavelength_min_um": 4.0,
+    "wavelength_max_um": 18.5,
+    "spectral_resolution": 33.333333333333336,
+    "quantum_efficiency": 0.7,
+    "throughput": 0.05,
+    "fov_taper": "none",
+    "exozodi_level": 1.0
+  },
+  "results": {
+    "snr_1h": 2.156060,
+    "snr_16days": 42.249971,
+    "integration_time_snr5_h": 5.377970,
+    "spectral_bins": 52
+  },
+  "notes": {
+    "snr_16days": "Derived from the one-hour SNR using square-root integration-time scaling.",
+    "noise": "Stellar leakage, local zodiacal and exozodiacal photon noise; no additional thermal or detector noise modules connected."
+  }
+}
