@@ -257,6 +257,66 @@ class TestLIFESurveySimulation(unittest.TestCase):
         self.assertTrue(np.all(rates["local_left"] > 0 / u.s))
         self.assertTrue(np.all(rates["local_right"] > 0 / u.s))
 
+    def test_exozodi_rates_positive(self):
+        """Verify that a nonzero dust disk produces detected photon rates."""
+        survey = make_survey()
+        observation = make_observation()
+
+        rates = survey.get_life_zodiacal_rates(**observation, nEZ=1.0)
+
+        for key in ("exozodi_left", "exozodi_right"):
+            self.assertTrue(np.all(rates[key] > 0 / u.s))
+
+    def test_zodiacal_rotation_symmetry(self):
+        """Verify 90-degree rotational symmetry for axisymmetric dust."""
+        survey = make_survey()
+        observation = make_observation()
+
+        observation["rotation_angles"] = np.array([0.0, 90.0]) * u.deg
+        rates = survey.get_life_zodiacal_rates(**observation, nEZ=1.0)
+
+        for key, rate in rates.items():
+            np.testing.assert_allclose(
+                rate[0].to_value(1 / u.s),
+                rate[1].to_value(1 / u.s),
+                rtol=1e-10,
+                atol=0,
+                err_msg=f"Rotation invariance failed for {key}",
+            )
+
+    def test_zodiacal_bin_width_scaling(self):
+        """Verify photon rates scale linearly with spectral-bin widths."""
+        survey = make_survey()
+        observation = make_observation()
+
+        original = survey.get_life_zodiacal_rates(**observation, nEZ=1.0)
+
+        wider = observation.copy()
+        wider["bin_widths"] = 2.0 * observation["bin_widths"]
+
+        doubled = survey.get_life_zodiacal_rates(**wider, nEZ=1.0)
+
+        for key in original:
+            np.testing.assert_allclose(
+                doubled[key].to_value(1 / u.s),
+                2.0 * original[key].to_value(1 / u.s),
+                rtol=1e-12,
+                atol=0,
+            )
+
+    def test_explicit_nez_without_planets(self):
+        """Allow a dust disk around a star with no simulated planets."""
+        survey = make_survey()
+        observation = make_observation()
+
+        survey.SimulatedUniverse.plan2star = np.array([], dtype=int)
+        survey.SimulatedUniverse.nEZ = np.array([], dtype=float)
+
+        rates = survey.get_life_zodiacal_rates(**observation, nEZ=1.0)
+
+        self.assertTrue(np.all(rates["exozodi_left"] > 0 / u.s))
+        self.assertTrue(np.all(rates["exozodi_right"] > 0 / u.s))
+
     def test_exozodi_scaling(self):
         """Check that exozodi rates scale linearly with dust level."""
 
