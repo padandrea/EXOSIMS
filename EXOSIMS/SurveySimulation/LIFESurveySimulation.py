@@ -167,6 +167,94 @@ class LIFESurveySimulation(SurveySimulation):
 
             nEZ = float(dust_levels[0])
 
+        if mode.get("LIFE_background_method", "grid") == "fourier":
+            if (
+                mode.get("LIFE_fov_taper", "none") != "none"
+                or mode.get("LIFE_fov_boundary", "square") != "circle"
+            ):
+                raise ValueError(
+                    "Fourier background mode requires an untapered "
+                    "circular field of view."
+                )
+
+            n_radial = int(mode.get("LIFE_radial_samples", 8193))
+            if n_radial < 3:
+                raise ValueError("LIFE_radial_samples must be >= 3.")
+
+            diameter = OS.pupilDiam.to_value(u.m)
+            max_radius = np.max(wavelengths.to_value(u.m)) / (2.0 * diameter)
+
+            radii = np.linspace(0.0, max_radius, n_radial)
+            radial_positions = np.column_stack((radii, np.zeros_like(radii))) * u.rad
+
+            local_spectrum = ZL.get_local_zodi_spectral_radiance(
+                wavelengths=wavelengths,
+                longitude=local_zodi_longitude,
+                latitude=local_zodi_latitude,
+                model=mode.get("LIFE_local_zodi_model", "mennesson"),
+            )
+
+            local_radial = (
+                np.broadcast_to(
+                    local_spectrum.value[None, :],
+                    (n_radial, len(wavelengths)),
+                )
+                * local_spectrum.unit
+            )
+
+            exozodi_radial = ZL.get_exozodi_spectral_radiance(
+                sky_positions=radial_positions,
+                wavelengths=wavelengths,
+                nEZ=nEZ,
+                star_distance=star_distance,
+                star_luminosity=star_luminosity,
+            )
+
+            positions = Obs.get_collector_positions(
+                rotation_angles,
+                nulling_baseline=nulling_baseline,
+            )
+
+            # Axisymmetric background: collector-pair lengths do
+            # not change under rotation. Evaluate only once.
+            reference_positions = positions[0]
+
+            local_left, local_right = OS.get_axisymmetric_background_rates(
+                reference_positions,
+                wavelengths,
+                bin_widths,
+                radii * u.rad,
+                local_radial,
+                mode,
+            )
+
+            exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
+                reference_positions,
+                wavelengths,
+                bin_widths,
+                radii * u.rad,
+                exozodi_radial,
+                mode,
+            )
+
+            n_rotations = positions.shape[0]
+
+            def repeat_rotations(rate):
+                return (
+                    np.broadcast_to(
+                        rate.value,
+                        (n_rotations, rate.shape[1]),
+                    )
+                    * rate.unit
+                )
+
+            return {
+                "local_left": repeat_rotations(local_left),
+                "local_right": repeat_rotations(local_right),
+                "exozodi_left": repeat_rotations(exozodi_left),
+                "exozodi_right": repeat_rotations(exozodi_right),
+            }
+
         # ---------------------------------------------------------
         # 3. Exozodiacal spectral radiance
         # ---------------------------------------------------------

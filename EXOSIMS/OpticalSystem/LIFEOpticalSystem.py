@@ -3,7 +3,7 @@
 import astropy.units as u
 import numpy as np
 from scipy.optimize import brentq
-from scipy.special import j1
+from scipy.special import j0, j1
 from synphot import Observation, SpectralElement
 from synphot.models import Box1D, Gaussian1D
 
@@ -795,6 +795,110 @@ class LIFEOpticalSystem(OpticalSystem):
             (transmission_left * incident_rate).to(1 / u.s),
             (transmission_right * incident_rate).to(1 / u.s),
         )
+
+    def get_axisymmetric_background_rates(
+        self,
+        collector_positions: u.Quantity,
+        wavelengths: u.Quantity,
+        bin_widths: u.Quantity,
+        radial_angles: u.Quantity,
+        radial_radiance: u.Quantity,
+        mode: dict,
+    ) -> tuple[u.Quantity, u.Quantity]:
+        """Fourier/Hankel photon rates for a circularly symmetric background.
+
+        Uses the existing LIFE collector geometry, combiner phases,
+        collecting area, throughput and QE.
+
+        The source radiance is supplied by LIFEZodiacalLight.
+        Requires a circular field of view without Gaussian taper.
+        """
+        if (
+            mode.get("LIFE_fov_taper", "none") != "none"
+            or mode.get("LIFE_fov_boundary", "square") != "circle"
+        ):
+            raise ValueError(
+                "Axisymmetric Fourier integration requires "
+                "an untapered circular field of view."
+            )
+
+        positions = np.asarray(collector_positions.to_value(u.m), dtype=float)
+        lam = np.atleast_1d(wavelengths.to_value(u.m))
+        widths = np.atleast_1d(bin_widths.to_value(u.um))
+        theta = np.atleast_1d(radial_angles.to_value(u.rad))
+        intensity = np.asarray(
+            radial_radiance.to_value(u.photon / (u.s * u.m**2 * u.um * u.sr))
+        )
+
+        if positions.shape != (4, 2):
+            raise ValueError("Expected four collector positions (4, 2).")
+        if intensity.shape != (theta.size, lam.size):
+            raise ValueError("Invalid radial radiance dimensions.")
+        if widths.shape != lam.shape:
+            raise ValueError("Wavelength widths do not match.")
+        if (
+            theta.size < 3
+            or theta[0] != 0
+            or not np.all(np.diff(theta) > 0)
+            or not np.all(np.isfinite(intensity))
+            or np.any(intensity < 0)
+        ):
+            raise ValueError("Invalid radial source sampling.")
+
+        diameter = self.pupilDiam.to_value(u.m)
+        max_radius = np.max(lam) / (2.0 * diameter)
+        if theta[-1] < max_radius * (1.0 - 1e-12):
+            raise ValueError("Radial grid does not cover the field of view.")
+
+        baseline_vectors = positions[:, None, :] - positions[None, :, :]
+        baseline_lengths = np.linalg.norm(baseline_vectors, axis=-1)
+
+        phases = (
+            np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2]),
+            np.array([0.0, 3 * np.pi / 2, np.pi, np.pi / 2]),
+        )
+        weights = [np.cos(p[:, None] - p[None, :]) / 16.0 for p in phases]
+
+        integrated = np.zeros((2, lam.size))
+
+        for k, wavelength in enumerate(lam):
+            fov_radius = wavelength / (2.0 * diameter)
+
+            # Include the exact field-of-view boundary.
+            end = np.searchsorted(theta, fov_radius, side="left")
+            radius = np.r_[theta[:end], fov_radius]
+            profile = np.r_[
+                intensity[:end, k],
+                np.interp(fov_radius, theta, intensity[:, k]),
+            ]
+
+            # Fourier transform of an axisymmetric source:
+            # I_tilde(q) = 2 pi integral I(r) J0(2 pi q r) r dr.
+            arguments = (
+                2.0
+                * np.pi
+                * baseline_lengths[:, :, None]
+                * radius[None, None, :]
+                / wavelength
+            )
+
+            visibility = np.trapezoid(
+                j0(arguments) * (2.0 * np.pi * radius * profile)[None, None, :],
+                x=radius,
+                axis=-1,
+            )
+
+            for output, weight in enumerate(weights):
+                integrated[output, k] = np.sum(weight * visibility)
+
+        qe = mode["inst"]["QE"](np.atleast_1d(wavelengths))
+        factor = self.total_collecting_area * (widths * u.um) * mode["attenuation"] * qe
+
+        flux_unit = u.photon / (u.s * u.m**2 * u.um)
+        left = (integrated[0] * flux_unit * factor).to(1 / u.s)
+        right = (integrated[1] * flux_unit * factor).to(1 / u.s)
+
+        return left[None, :], right[None, :]
 
     def get_extended_background_rates(
         self,
