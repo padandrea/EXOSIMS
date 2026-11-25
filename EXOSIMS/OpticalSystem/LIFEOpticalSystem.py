@@ -29,6 +29,27 @@ class LIFEOpticalSystem(OpticalSystem):
     # Configure the LIFE instrument and initialize EXOSIMS interfaces.
 
     @staticmethod
+    def get_life_local_zodi_method(mode, background):
+        """Resolve local-zodi integration independently of exozodi."""
+        method = mode.get(
+            "LIFE_local_zodi_method",
+            "grid" if background == "grid" else "hankel_linear",
+        )
+
+        if method not in ("grid", "hankel_linear", "analytic"):
+            raise ValueError("Invalid LIFE_local_zodi_method.")
+
+        if method != "grid" and (
+            mode.get("LIFE_fov_boundary", "square") != "circle"
+            or mode.get("LIFE_fov_taper", "none") != "none"
+        ):
+            raise ValueError(
+                "Hankel and analytical local zodi require " "an untapered circular FoV."
+            )
+
+        return method
+
+    @staticmethod
     def get_life_background_configuration(mode):
         """Resolve integration settings while preserving legacy defaults."""
         method = mode.get("LIFE_exozodi_method")
@@ -78,6 +99,8 @@ class LIFEOpticalSystem(OpticalSystem):
                 or value < 3
             ):
                 raise ValueError(f"{name} must be an integer >= 3.")
+
+        LIFEOpticalSystem.get_life_local_zodi_method(mode, background)
 
         return background, method, int(local_samples), int(ez_samples)
 
@@ -165,6 +188,7 @@ class LIFEOpticalSystem(OpticalSystem):
                 "LIFE_fov_taper",
                 "LIFE_fov_boundary",
                 "LIFE_local_zodi_model",
+                "LIFE_local_zodi_method",
                 "LIFE_background_method",
                 "LIFE_radial_samples",
                 "LIFE_exozodi_method",
@@ -945,6 +969,101 @@ class LIFEOpticalSystem(OpticalSystem):
         )
 
         rates = (integrated * flux_unit * factor).to(1 / u.s)
+
+        return rates[0:1], rates[1:2]
+
+    def get_uniform_disk_background_rates(
+        self,
+        collector_positions,
+        wavelengths,
+        bin_widths,
+        spectral_radiance,
+        mode,
+    ):
+        """Exact photon rates for uniform circular background emission.
+
+        The field-of-view radius is lambda / (2 D).
+        The normalized disk visibility is 2 J1(x) / x,
+        with x = pi b / D and the limiting value 1 at b = 0.
+
+        No radial or angular numerical integration is required.
+        """
+        if (
+            mode.get("LIFE_fov_boundary", "square") != "circle"
+            or mode.get("LIFE_fov_taper", "none") != "none"
+        ):
+            raise ValueError(
+                "Uniform-disk integration requires an untapered circular FoV."
+            )
+
+        positions = np.asarray(collector_positions.to_value(u.m), dtype=float)
+
+        lam = np.atleast_1d(wavelengths.to_value(u.m))
+        widths = np.atleast_1d(bin_widths.to_value(u.um))
+
+        radiance_unit = u.photon / (u.s * u.m**2 * u.um * u.sr)
+
+        spectrum = np.atleast_1d(spectral_radiance.to_value(radiance_unit))
+
+        diameter = self.pupilDiam.to_value(u.m)
+
+        if (
+            positions.shape != (4, 2)
+            or not np.all(np.isfinite(positions))
+            or lam.ndim != 1
+            or lam.size == 0
+            or not np.all(np.isfinite(lam))
+            or np.any(lam <= 0)
+            or widths.shape != lam.shape
+            or not np.all(np.isfinite(widths))
+            or np.any(widths <= 0)
+            or spectrum.shape != lam.shape
+            or not np.all(np.isfinite(spectrum))
+            or np.any(spectrum < 0)
+            or not np.isfinite(diameter)
+            or diameter <= 0
+        ):
+            raise ValueError("Invalid uniform-disk background input.")
+
+        baselines = np.linalg.norm(
+            positions[:, None, :] - positions[None, :, :],
+            axis=-1,
+        )
+
+        x = np.pi * baselines / diameter
+
+        visibility = np.divide(
+            2.0 * j1(x),
+            x,
+            out=np.ones_like(x),
+            where=x != 0,
+        )
+
+        phases = np.array(
+            [
+                [0.0, np.pi / 2, np.pi, 3 * np.pi / 2],
+                [0.0, 3 * np.pi / 2, np.pi, np.pi / 2],
+            ]
+        )
+
+        weights = np.cos(phases[:, :, None] - phases[:, None, :]) / 16.0
+
+        transmission = np.einsum("oij,ij->o", weights, visibility)
+
+        transmission = np.maximum(transmission, 0.0)
+
+        fov_radius = lam / (2.0 * diameter)
+
+        flux = spectrum * radiance_unit * np.pi * fov_radius**2 * u.sr
+
+        factor = (
+            self.total_collecting_area
+            * (widths * u.um)
+            * mode["attenuation"]
+            * mode["inst"]["QE"](np.atleast_1d(wavelengths))
+        )
+
+        rates = (transmission[:, None] * flux[None, :] * factor).to(1 / u.s)
 
         return rates[0:1], rates[1:2]
 

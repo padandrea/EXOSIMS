@@ -706,6 +706,81 @@ class TestLIFESurveySimulation(unittest.TestCase):
                 for key in ("exozodi_left", "exozodi_right"):
                     np.testing.assert_array_equal(rates[key].value, 0.0)
 
+    def test_independent_local_and_exozodi_methods(self):
+        """All 12 local/exozodi integration combinations must work."""
+        survey, obs = self._make_fourier_observation()
+
+        obs["mode"].pop("LIFE_background_method", None)
+        obs["mode"]["LIFE_exozodi_samples"] = 256
+
+        local_reference = {}
+        exozodi_reference = {}
+
+        for local in ("grid", "hankel_linear", "analytic"):
+            for ez in (
+                "grid",
+                "hankel_linear",
+                "hankel_log",
+                "thin_rings",
+            ):
+                with self.subTest(local=local, ez=ez):
+                    obs["mode"].update(
+                        {
+                            "LIFE_local_zodi_method": local,
+                            "LIFE_exozodi_method": ez,
+                        }
+                    )
+
+                    rates = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+                    for key, rate in rates.items():
+                        self.assertTrue(np.all(np.isfinite(rate.value)))
+                        self.assertTrue(np.all(rate.value >= 0))
+
+                        if key.startswith("local"):
+                            cache = local_reference
+                            cache_key = (local, key)
+                        else:
+                            cache = exozodi_reference
+                            cache_key = (ez, key)
+
+                        if cache_key not in cache:
+                            cache[cache_key] = rate.value.copy()
+
+                        np.testing.assert_array_equal(rate.value, cache[cache_key])
+
+    def test_analytic_local_zodi_dispatch(self):
+        """Analytical local zodi must not invoke radial quadrature."""
+        survey, obs = self._make_fourier_observation()
+
+        obs["mode"].update(
+            {
+                "LIFE_local_zodi_method": "analytic",
+                "LIFE_exozodi_method": "thin_rings",
+                "LIFE_exozodi_samples": 256,
+            }
+        )
+
+        optical = survey.OpticalSystem
+
+        with (
+            patch.object(
+                optical,
+                "get_axisymmetric_background_rates",
+                side_effect=AssertionError("Unexpected radial integration"),
+            ),
+            patch.object(
+                optical,
+                "get_uniform_disk_background_rates",
+                wraps=optical.get_uniform_disk_background_rates,
+            ) as analytic,
+        ):
+            rates = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+        analytic.assert_called_once()
+
+        self.assertTrue(np.all(rates["local_left"].value > 0))
+
 
 if __name__ == "__main__":
     unittest.main()

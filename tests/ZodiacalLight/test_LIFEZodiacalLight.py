@@ -298,3 +298,30 @@ class TestLIFEZodiacalLight(unittest.TestCase):
         np.testing.assert_allclose(triple.value, 3.0 * flux.value, rtol=1e-12)
 
         self.assertTrue(np.all(radii[:, 1] <= fov[1]))
+
+    def test_mennesson_coordinate_symmetry(self):
+        """Mennesson must support signed latitudes and periodic longitudes."""
+        wavelengths = np.array([4.0, 10.0, 18.5]) * u.um
+
+        expected = self.zodi.get_local_zodi_spectral_radiance(
+            wavelengths, 135 * u.deg, 45 * u.deg, model="mennesson"
+        )
+
+        for lon, lat in (
+            (135, -45),
+            (225, 45),
+            (-135, -45),
+            (495, 45),
+            (585, -45),
+        ):
+            with self.subTest(lon=lon, lat=lat):
+                actual = self.zodi.get_local_zodi_spectral_radiance(
+                    wavelengths,
+                    lon * u.deg,
+                    lat * u.deg,
+                    model="mennesson",
+                )
+
+                self.assertTrue(np.all(np.isfinite(actual.value)))
+
+                np.testing.assert_allclose(actual.value, expected.value, rtol=1e-12)

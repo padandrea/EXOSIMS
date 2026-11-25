@@ -60,17 +60,22 @@ class LIFEZodiacalLight(Mennesson):
             raise ValueError("Local-zodi coordinates must be finite.")
 
         radiance_unit = u.photon / (u.s * u.m**2 * u.um * u.sr)
+        if abs(lat) > np.pi / 2:
+            raise ValueError("ecliptic latitude must be within [-90, 90] deg.")
+
         if model == "mennesson":
+            # Leinert Table 17 covers solar-relative longitude
+            # 0--180 degrees and absolute latitude 0--90 degrees.
+            folded_lon = abs((longitude.to_value(u.deg) + 180.0) % 360.0 - 180.0)
+            folded_lat = abs(latitude.to_value(u.deg))
+
             reference = self.zodi_intensity_at_location(
-                np.atleast_1d(longitude.to(u.deg)),
-                np.atleast_1d(latitude.to(u.deg)),
+                np.atleast_1d(folded_lon) * u.deg,
+                np.atleast_1d(folded_lat) * u.deg,
                 photon_units=True,
             )
             color = self.zodi_color_correction_factor(wavelength, photon_units=True)
             return (reference[0] * color).to(radiance_unit)
-
-        if abs(lat) > np.pi / 2:
-            raise ValueError("ecliptic latitude must be within [-90, 90] deg.")
 
         # LIFEsim pn_localzodi.py: elongation angle and dust scale height.
         cos_elongation = np.clip(np.cos(lon) * np.cos(lat), -1.0, 1.0)

@@ -2411,6 +2411,102 @@ class TestLIFEOpticalSystem(unittest.TestCase):
 
             np.testing.assert_allclose(result.value, expected.value, rtol=1e-10)
 
+    def test_uniform_disk_background_accuracy(self):
+        """Compare exact uniform-disk response with high-resolution Hankel."""
+        optical = make_fov_test_optical_system()
+
+        positions = reference_collector_positions(np.array([0.0]) * u.rad)[0]
+
+        wavelengths = np.array([4.0, 10.0, 18.5]) * u.um
+        widths = wavelengths / 33.3
+
+        mode = {
+            **optical.observingModes[0],
+            "LIFE_fov_boundary": "circle",
+            "LIFE_fov_taper": "none",
+        }
+
+        spectrum = np.array([100.0, 200.0, 300.0]) * (
+            u.photon / (u.s * u.m**2 * u.um * u.sr)
+        )
+
+        radius = np.max(wavelengths.to_value(u.m)) / (
+            2 * optical.pupilDiam.to_value(u.m)
+        )
+
+        radii = np.linspace(0.0, radius, 32769) * u.rad
+
+        profile = (
+            np.broadcast_to(spectrum.value, (len(radii), len(wavelengths)))
+            * spectrum.unit
+        )
+
+        expected = optical.get_axisymmetric_background_rates(
+            positions, wavelengths, widths, radii, profile, mode
+        )
+
+        actual = optical.get_uniform_disk_background_rates(
+            positions, wavelengths, widths, spectrum, mode
+        )
+
+        for result, truth in zip(actual, expected, strict=True):
+            np.testing.assert_allclose(result.value, truth.value, rtol=1e-7)
+
+        zero = optical.get_uniform_disk_background_rates(
+            positions, wavelengths, widths, spectrum * 0, mode
+        )
+
+        for result in zero:
+            np.testing.assert_array_equal(result.value, 0.0)
+
+    def test_local_zodi_method_configuration(self):
+        """Validate JSON configuration and independent method choices."""
+        optical = LIFEOpticalSystem(
+            pupilDiam=3.0,
+            scienceInstruments=[{"name": "LIFE-spectrometer"}],
+            starlightSuppressionSystems=[{"name": "nuller", "lam": 10000}],
+            observingModes=[
+                {
+                    "instName": "LIFE-spectrometer",
+                    "systName": "nuller",
+                    "LIFE_fov_boundary": "circle",
+                    "LIFE_local_zodi_method": "analytic",
+                    "LIFE_exozodi_method": "grid",
+                }
+            ],
+        )
+
+        mode = optical.observingModes[0]
+
+        background, ez_method, _, _ = optical.get_life_background_configuration(mode)
+
+        self.assertEqual(ez_method, "grid")
+
+        self.assertEqual(
+            optical.get_life_local_zodi_method(mode, background),
+            "analytic",
+        )
+
+        self.assertIn(
+            "LIFE_local_zodi_method",
+            optical.allowed_observingMode_kws,
+        )
+
+    def test_invalid_local_zodi_method(self):
+        """Reject unknown methods and unsupported FoV geometries."""
+        for mode in (
+            {"LIFE_local_zodi_method": "unknown"},
+            {"LIFE_local_zodi_method": "analytic"},
+            {
+                "LIFE_local_zodi_method": "analytic",
+                "LIFE_fov_boundary": "circle",
+                "LIFE_fov_taper": "gaussian",
+            },
+        ):
+            with self.subTest(mode=mode):
+                with self.assertRaises(ValueError):
+                    LIFEOpticalSystem.get_life_background_configuration(mode)
+
 
 if __name__ == "__main__":
     unittest.main()

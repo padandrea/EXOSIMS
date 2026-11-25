@@ -171,18 +171,54 @@ class LIFESurveySimulation(SurveySimulation):
             mode
         )
 
-        if background == "fourier":
+        local_method = OS.get_life_local_zodi_method(mode, background)
+
+        positions = Obs.get_collector_positions(
+            rotation_angles,
+            nulling_baseline=nulling_baseline,
+        )
+
+        n_rotations = positions.shape[0]
+        reference_positions = positions[0]
+
+        def repeat_rotations(rate):
+            return np.broadcast_to(rate.value, (n_rotations, rate.shape[1])) * rate.unit
+
+        if local_method != "grid" or ez_method != "grid":
             diameter = OS.pupilDiam.to_value(u.m)
-            max_radius = np.max(wavelengths.to_value(u.m)) / (2.0 * diameter)
 
-            radii = np.linspace(0.0, max_radius, n_radial)
+            fov_radii = (wavelengths.to_value(u.m) / (2.0 * diameter)) * u.rad
 
-            local_spectrum = ZL.get_local_zodi_spectral_radiance(
-                wavelengths=wavelengths,
-                longitude=local_zodi_longitude,
-                latitude=local_zodi_latitude,
-                model=mode.get("LIFE_local_zodi_model", "mennesson"),
+            max_radius = np.max(fov_radii)
+
+        # -----------------------------------------------------
+        # Local zodiacal light: source brightness
+        # -----------------------------------------------------
+
+        local_spectrum = ZL.get_local_zodi_spectral_radiance(
+            wavelengths=wavelengths,
+            longitude=local_zodi_longitude,
+            latitude=local_zodi_latitude,
+            model=mode.get("LIFE_local_zodi_model", "mennesson"),
+        )
+
+        # -----------------------------------------------------
+        # Local zodiacal light: instrument transmission
+        # -----------------------------------------------------
+
+        if local_method == "analytic":
+
+            local_left, local_right = OS.get_uniform_disk_background_rates(
+                reference_positions,
+                wavelengths,
+                bin_widths,
+                local_spectrum,
+                mode,
             )
+
+        elif local_method == "hankel_linear":
+
+            radii = np.linspace(0.0, max_radius.to_value(u.rad), n_radial) * u.rad
 
             local_radial = (
                 np.broadcast_to(
@@ -192,148 +228,117 @@ class LIFESurveySimulation(SurveySimulation):
                 * local_spectrum.unit
             )
 
-            positions = Obs.get_collector_positions(
-                rotation_angles,
-                nulling_baseline=nulling_baseline,
-            )
-
-            # Axisymmetric background: collector-pair lengths do
-            # not change under rotation. Evaluate only once.
-            reference_positions = positions[0]
-
             local_left, local_right = OS.get_axisymmetric_background_rates(
                 reference_positions,
                 wavelengths,
                 bin_widths,
-                radii * u.rad,
+                radii,
                 local_radial,
                 mode,
             )
 
-            if ez_method == "thin_rings":
-                ez_radii, ez_fluxes = ZL.get_exozodi_thin_rings(
-                    wavelengths=wavelengths,
-                    nEZ=nEZ,
-                    star_distance=star_distance,
-                    star_luminosity=star_luminosity,
-                    fov_radii=(wavelengths.to_value(u.m) / (2.0 * diameter)) * u.rad,
-                    n_rings=n_ez,
-                )
+        else:
 
-                exozodi_left, exozodi_right = OS.get_thin_ring_background_rates(
+            local_radiance = (
+                np.broadcast_to(
+                    local_spectrum.value[None, :],
+                    (len(sky_positions), len(wavelengths)),
+                )
+                * local_spectrum.unit
+            )
+
+            local_left, local_right = OS.get_extended_background_rates(
+                collector_positions=positions,
+                wavelengths=wavelengths,
+                bin_widths=bin_widths,
+                sky_positions=sky_positions,
+                spectral_radiance=local_radiance,
+                pixel_solid_angles=pixel_solid_angles,
+                mode=mode,
+            )
+
+        if local_method != "grid":
+            local_left = repeat_rotations(local_left)
+            local_right = repeat_rotations(local_right)
+
+        # -----------------------------------------------------
+        # Exozodiacal light: source and instrument transmission
+        # -----------------------------------------------------
+
+        if ez_method == "grid":
+
+            exozodi_radiance = ZL.get_exozodi_spectral_radiance(
+                sky_positions=sky_positions,
+                wavelengths=wavelengths,
+                nEZ=nEZ,
+                star_distance=star_distance,
+                star_luminosity=star_luminosity,
+            )
+
+            exozodi_left, exozodi_right = OS.get_extended_background_rates(
+                collector_positions=positions,
+                wavelengths=wavelengths,
+                bin_widths=bin_widths,
+                sky_positions=sky_positions,
+                spectral_radiance=exozodi_radiance,
+                pixel_solid_angles=pixel_solid_angles,
+                mode=mode,
+            )
+
+        elif ez_method == "thin_rings":
+
+            ez_radii, ez_fluxes = ZL.get_exozodi_thin_rings(
+                wavelengths=wavelengths,
+                nEZ=nEZ,
+                star_distance=star_distance,
+                star_luminosity=star_luminosity,
+                fov_radii=fov_radii,
+                n_rings=n_ez,
+            )
+
+            exozodi_left, exozodi_right = OS.get_thin_ring_background_rates(
+                reference_positions,
+                wavelengths,
+                bin_widths,
+                ez_radii,
+                ez_fluxes,
+                mode,
+            )
+
+        else:
+
+            spacing = "log" if ez_method == "hankel_log" else "linear"
+
+            ez_radii, ez_radiance = ZL.get_exozodi_radial_profile(
+                wavelengths=wavelengths,
+                nEZ=nEZ,
+                star_distance=star_distance,
+                star_luminosity=star_luminosity,
+                outer_radius=max_radius,
+                n_samples=n_ez,
+                spacing=spacing,
+            )
+
+            if ez_radii.size:
+
+                exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
                     reference_positions,
                     wavelengths,
                     bin_widths,
                     ez_radii,
-                    ez_fluxes,
+                    ez_radiance,
                     mode,
                 )
 
             else:
-                spacing = "log" if ez_method == "hankel_log" else "linear"
 
-                ez_radii, ez_radiance = ZL.get_exozodi_radial_profile(
-                    wavelengths=wavelengths,
-                    nEZ=nEZ,
-                    star_distance=star_distance,
-                    star_luminosity=star_luminosity,
-                    outer_radius=max_radius * u.rad,
-                    n_samples=n_ez,
-                    spacing=spacing,
-                )
+                exozodi_left = np.zeros((1, len(wavelengths))) / u.s
 
-                if ez_radii.size:
-                    exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
-                        reference_positions,
-                        wavelengths,
-                        bin_widths,
-                        ez_radii,
-                        ez_radiance,
-                        mode,
-                    )
-                else:
-                    exozodi_left = np.zeros_like(local_left.value) * local_left.unit
-                    exozodi_right = np.zeros_like(local_right.value) * local_right.unit
+                exozodi_right = exozodi_left.copy()
 
-            n_rotations = positions.shape[0]
-
-            def repeat_rotations(rate):
-                return (
-                    np.broadcast_to(
-                        rate.value,
-                        (n_rotations, rate.shape[1]),
-                    )
-                    * rate.unit
-                )
-
-            return {
-                "local_left": repeat_rotations(local_left),
-                "local_right": repeat_rotations(local_right),
-                "exozodi_left": repeat_rotations(exozodi_left),
-                "exozodi_right": repeat_rotations(exozodi_right),
-            }
-
-        # ---------------------------------------------------------
-        # 3. Exozodiacal spectral radiance
-        # ---------------------------------------------------------
-        exozodi_radiance = ZL.get_exozodi_spectral_radiance(
-            sky_positions=sky_positions,
-            wavelengths=wavelengths,
-            nEZ=nEZ,
-            star_distance=star_distance,
-            star_luminosity=star_luminosity,
-        )
-
-        # ---------------------------------------------------------
-        # 4. Local-zodiacal spectral radiance
-        # ---------------------------------------------------------
-        local_spectrum = ZL.get_local_zodi_spectral_radiance(
-            wavelengths=wavelengths,
-            longitude=local_zodi_longitude,
-            latitude=local_zodi_latitude,
-            model=mode.get("LIFE_local_zodi_model", "mennesson"),
-        )
-
-        # Local zodi is approximately uniform over the
-        # small interferometric field of view.
-        local_radiance = (
-            np.broadcast_to(
-                local_spectrum.value[None, :],
-                exozodi_radiance.shape,
-            )
-            * local_spectrum.unit
-        )
-
-        # ---------------------------------------------------------
-        # 5. Collector geometry from LIFEObservatory
-        # ---------------------------------------------------------
-        collector_positions = Obs.get_collector_positions(
-            rotation_angles,
-            nulling_baseline=nulling_baseline,
-        )
-
-        # ---------------------------------------------------------
-        # 6. Instrument photon rates
-        # ---------------------------------------------------------
-        local_left, local_right = OS.get_extended_background_rates(
-            collector_positions=collector_positions,
-            wavelengths=wavelengths,
-            bin_widths=bin_widths,
-            sky_positions=sky_positions,
-            spectral_radiance=local_radiance,
-            pixel_solid_angles=pixel_solid_angles,
-            mode=mode,
-        )
-
-        exozodi_left, exozodi_right = OS.get_extended_background_rates(
-            collector_positions=collector_positions,
-            wavelengths=wavelengths,
-            bin_widths=bin_widths,
-            sky_positions=sky_positions,
-            spectral_radiance=exozodi_radiance,
-            pixel_solid_angles=pixel_solid_angles,
-            mode=mode,
-        )
+        if ez_method != "grid":
+            exozodi_left = repeat_rotations(exozodi_left)
+            exozodi_right = repeat_rotations(exozodi_right)
 
         return {
             "local_left": local_left,
