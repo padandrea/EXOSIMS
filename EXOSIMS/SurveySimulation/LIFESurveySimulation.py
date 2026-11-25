@@ -167,20 +167,11 @@ class LIFESurveySimulation(SurveySimulation):
 
             nEZ = float(dust_levels[0])
 
-        if mode.get("LIFE_background_method", "grid") == "fourier":
-            if (
-                mode.get("LIFE_fov_taper", "none") != "none"
-                or mode.get("LIFE_fov_boundary", "square") != "circle"
-            ):
-                raise ValueError(
-                    "Fourier background mode requires an untapered "
-                    "circular field of view."
-                )
+        background, ez_method, n_radial, n_ez = OS.get_life_background_configuration(
+            mode
+        )
 
-            n_radial = int(mode.get("LIFE_radial_samples", 8193))
-            if n_radial < 3:
-                raise ValueError("LIFE_radial_samples must be >= 3.")
-
+        if background == "fourier":
             diameter = OS.pupilDiam.to_value(u.m)
             max_radius = np.max(wavelengths.to_value(u.m)) / (2.0 * diameter)
 
@@ -201,30 +192,6 @@ class LIFESurveySimulation(SurveySimulation):
                 * local_spectrum.unit
             )
 
-            # The local foreground extends to the optical axis.
-            # Exozodi begins at the physical inner dust boundary.
-            inner_angle = ZL.get_exozodi_inner_radius(star_luminosity).to_value(
-                u.m
-            ) / star_distance.to_value(u.m)
-
-            dust_in_fov = inner_angle < max_radius
-
-            ez_radii = (
-                np.linspace(inner_angle, max_radius, n_radial) if dust_in_fov else radii
-            )
-
-            exozodi_positions = (
-                np.column_stack((ez_radii, np.zeros_like(ez_radii))) * u.rad
-            )
-
-            exozodi_radial = ZL.get_exozodi_spectral_radiance(
-                sky_positions=exozodi_positions,
-                wavelengths=wavelengths,
-                nEZ=nEZ,
-                star_distance=star_distance,
-                star_luminosity=star_luminosity,
-            )
-
             positions = Obs.get_collector_positions(
                 rotation_angles,
                 nulling_baseline=nulling_baseline,
@@ -243,20 +210,50 @@ class LIFESurveySimulation(SurveySimulation):
                 mode,
             )
 
-            if dust_in_fov:
-                exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
+            if ez_method == "thin_rings":
+                ez_radii, ez_fluxes = ZL.get_exozodi_thin_rings(
+                    wavelengths=wavelengths,
+                    nEZ=nEZ,
+                    star_distance=star_distance,
+                    star_luminosity=star_luminosity,
+                    fov_radii=(wavelengths.to_value(u.m) / (2.0 * diameter)) * u.rad,
+                    n_rings=n_ez,
+                )
+
+                exozodi_left, exozodi_right = OS.get_thin_ring_background_rates(
                     reference_positions,
                     wavelengths,
                     bin_widths,
-                    ez_radii * u.rad,
-                    exozodi_radial,
+                    ez_radii,
+                    ez_fluxes,
                     mode,
                 )
+
             else:
-                # All wavelength-dependent FoVs lie inside the
-                # dust cavity. No exozodi photons are transmitted.
-                exozodi_left = np.zeros_like(local_left.value) * local_left.unit
-                exozodi_right = np.zeros_like(local_right.value) * local_right.unit
+                spacing = "log" if ez_method == "hankel_log" else "linear"
+
+                ez_radii, ez_radiance = ZL.get_exozodi_radial_profile(
+                    wavelengths=wavelengths,
+                    nEZ=nEZ,
+                    star_distance=star_distance,
+                    star_luminosity=star_luminosity,
+                    outer_radius=max_radius * u.rad,
+                    n_samples=n_ez,
+                    spacing=spacing,
+                )
+
+                if ez_radii.size:
+                    exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
+                        reference_positions,
+                        wavelengths,
+                        bin_widths,
+                        ez_radii,
+                        ez_radiance,
+                        mode,
+                    )
+                else:
+                    exozodi_left = np.zeros_like(local_left.value) * local_left.unit
+                    exozodi_right = np.zeros_like(local_right.value) * local_right.unit
 
             n_rotations = positions.shape[0]
 

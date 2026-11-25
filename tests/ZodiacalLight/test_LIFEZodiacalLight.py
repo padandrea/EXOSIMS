@@ -237,3 +237,64 @@ class TestLIFEZodiacalLight(unittest.TestCase):
                 np.testing.assert_array_equal(rates[0], 0.0)
                 self.assertTrue(np.all(rates[1:] > 0))
                 np.testing.assert_allclose(rates[1], rates[2], rtol=1e-6)
+
+    def test_exozodi_radial_sampling_methods(self):
+        """Both grids must preserve the physical dust boundary."""
+        arguments = dict(
+            wavelengths=np.array([8.0, 12.0]) * u.um,
+            nEZ=1.0,
+            star_distance=10.0 * u.pc,
+            star_luminosity=1.0,
+            outer_radius=3e-6 * u.rad,
+            n_samples=256,
+        )
+
+        inner = self.zodi.get_exozodi_inner_angle(10.0 * u.pc, 1.0)
+
+        for spacing in ("linear", "log"):
+            with self.subTest(spacing=spacing):
+                radii, intensity = self.zodi.get_exozodi_radial_profile(
+                    **arguments, spacing=spacing
+                )
+
+                self.assertEqual(intensity.shape, (256, 2))
+                self.assertEqual(radii[0], inner)
+                self.assertEqual(radii[-1], arguments["outer_radius"])
+                self.assertTrue(np.all(intensity.value > 0))
+
+                if spacing == "linear":
+                    steps = np.diff(radii.value)
+                    np.testing.assert_allclose(steps, steps[0])
+                else:
+                    ratios = radii.value[1:] / radii.value[:-1]
+                    np.testing.assert_allclose(ratios, ratios[0])
+
+    def test_thin_ring_flux_and_fov(self):
+        """Check ring units, dust scaling and wavelength-dependent clipping."""
+        inner = self.zodi.get_exozodi_inner_angle(10.0 * u.pc, 1.0)
+
+        fov = inner * np.array([0.5, 100.0])
+
+        arguments = dict(
+            wavelengths=np.array([8.0, 12.0]) * u.um,
+            star_distance=10.0 * u.pc,
+            star_luminosity=1.0,
+            fov_radii=fov,
+            n_rings=256,
+        )
+
+        radii, flux = self.zodi.get_exozodi_thin_rings(**arguments, nEZ=1.0)
+
+        _, triple = self.zodi.get_exozodi_thin_rings(**arguments, nEZ=3.0)
+
+        self.assertEqual(radii.shape, (256, 2))
+        self.assertEqual(flux.shape, (256, 2))
+
+        self.assertTrue(flux.unit.is_equivalent(u.photon / (u.s * u.m**2 * u.um)))
+
+        np.testing.assert_array_equal(flux[:, 0].value, 0.0)
+        self.assertTrue(np.all(flux[:, 1].value > 0))
+
+        np.testing.assert_allclose(triple.value, 3.0 * flux.value, rtol=1e-12)
+
+        self.assertTrue(np.all(radii[:, 1] <= fov[1]))

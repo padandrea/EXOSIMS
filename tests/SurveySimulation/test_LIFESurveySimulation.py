@@ -1,6 +1,7 @@
 """Tests for the LIFE survey simulation interface."""
 
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import astropy.units as u
@@ -597,6 +598,113 @@ class TestLIFESurveySimulation(unittest.TestCase):
 
         for key in ("local_left", "local_right"):
             self.assertTrue(np.all(rates[key].value > 0))
+
+    def test_selectable_exozodi_methods(self):
+        """All accelerated methods must reproduce the continuous reference."""
+        survey, obs = self._make_fourier_observation()
+
+        reference = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+        for method in ("hankel_linear", "hankel_log", "thin_rings"):
+            with self.subTest(method=method):
+                obs["mode"]["LIFE_exozodi_method"] = method
+                obs["mode"]["LIFE_exozodi_samples"] = (
+                    8193 if method == "hankel_linear" else 256
+                )
+
+                with (
+                    patch.object(
+                        survey.ZodiacalLight,
+                        "get_exozodi_radial_profile",
+                        wraps=survey.ZodiacalLight.get_exozodi_radial_profile,
+                    ) as profile,
+                    patch.object(
+                        survey.ZodiacalLight,
+                        "get_exozodi_thin_rings",
+                        wraps=survey.ZodiacalLight.get_exozodi_thin_rings,
+                    ) as rings,
+                    patch.object(
+                        survey.OpticalSystem,
+                        "get_thin_ring_background_rates",
+                        wraps=survey.OpticalSystem.get_thin_ring_background_rates,
+                    ) as ring_response,
+                ):
+                    actual = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+                if method == "thin_rings":
+                    rings.assert_called_once()
+                    ring_response.assert_called_once()
+                    profile.assert_not_called()
+                    self.assertEqual(rings.call_args.kwargs["n_rings"], 256)
+                else:
+                    profile.assert_called_once()
+                    rings.assert_not_called()
+                    ring_response.assert_not_called()
+
+                    self.assertEqual(
+                        profile.call_args.kwargs["spacing"],
+                        "log" if method == "hankel_log" else "linear",
+                    )
+
+                    self.assertEqual(
+                        profile.call_args.kwargs["n_samples"],
+                        8193 if method == "hankel_linear" else 256,
+                    )
+
+                for key in ("local_left", "local_right"):
+                    np.testing.assert_array_equal(
+                        actual[key].value, reference[key].value
+                    )
+
+                for key in ("exozodi_left", "exozodi_right"):
+                    np.testing.assert_allclose(
+                        actual[key].value,
+                        reference[key].value,
+                        rtol=1e-3,
+                        atol=0,
+                    )
+
+    def test_selectable_exozodi_cavities(self):
+        """All methods must correctly handle full and partial dust cavities."""
+        for method in ("hankel_linear", "hankel_log", "thin_rings"):
+            for inner_angle in (1.8e-6, 2.1e-6):
+                with self.subTest(method=method, inner=inner_angle):
+                    survey, obs = self._make_fourier_observation(inner_angle)
+
+                    obs["mode"].update(
+                        {
+                            "LIFE_exozodi_method": method,
+                            "LIFE_exozodi_samples": 256,
+                        }
+                    )
+
+                    rates = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+                    for key in ("exozodi_left", "exozodi_right"):
+                        np.testing.assert_array_equal(rates[key].value[:, 0], 0.0)
+
+                        if inner_angle > 2e-6:
+                            np.testing.assert_array_equal(rates[key].value, 0.0)
+                        else:
+                            self.assertTrue(np.all(rates[key].value[:, 1] > 0))
+
+    def test_selectable_exozodi_zero_dust(self):
+        """Every selectable method must return zero flux for zero zodis."""
+        survey, obs = self._make_fourier_observation()
+
+        for method in ("hankel_linear", "hankel_log", "thin_rings"):
+            with self.subTest(method=method):
+                obs["mode"].update(
+                    {
+                        "LIFE_exozodi_method": method,
+                        "LIFE_exozodi_samples": 256,
+                    }
+                )
+
+                rates = survey.get_life_zodiacal_rates(**obs, nEZ=0.0)
+
+                for key in ("exozodi_left", "exozodi_right"):
+                    np.testing.assert_array_equal(rates[key].value, 0.0)
 
 
 if __name__ == "__main__":

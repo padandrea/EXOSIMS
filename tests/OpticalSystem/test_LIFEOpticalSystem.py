@@ -2306,6 +2306,111 @@ class TestLIFEOpticalSystem(unittest.TestCase):
                 atol=0,
             )
 
+    def test_exozodi_method_configuration(self):
+        """Verify observing-mode registration and legacy defaults."""
+        for method in ("hankel_linear", "hankel_log", "thin_rings"):
+            with self.subTest(method=method):
+                life = LIFEOpticalSystem(
+                    pupilDiam=2.0,
+                    scienceInstruments=[{"name": "LIFE-spectrometer"}],
+                    starlightSuppressionSystems=[{"name": "nuller", "lam": 10000}],
+                    observingModes=[
+                        {
+                            "instName": "LIFE-spectrometer",
+                            "systName": "nuller",
+                            "LIFE_fov_boundary": "circle",
+                            "LIFE_exozodi_method": method,
+                            "LIFE_exozodi_samples": 256,
+                        }
+                    ],
+                )
+
+                mode = life.observingModes[0]
+
+                self.assertEqual(
+                    life.get_life_background_configuration(mode),
+                    ("fourier", method, 8193, 256),
+                )
+
+                self.assertIn(
+                    "LIFE_exozodi_method",
+                    life.allowed_observingMode_kws,
+                )
+
+        self.assertEqual(
+            LIFEOpticalSystem.get_life_background_configuration({}),
+            ("grid", "grid", 8193, 8193),
+        )
+
+    def test_invalid_exozodi_configuration(self):
+        """Reject unknown methods, invalid sample counts and incompatible FoVs."""
+        base = {"LIFE_fov_boundary": "circle"}
+
+        invalid = (
+            {"LIFE_exozodi_method": "unknown"},
+            {"LIFE_background_method": "unknown"},
+            {"LIFE_exozodi_method": "hankel_log", "LIFE_exozodi_samples": 2},
+            {"LIFE_exozodi_method": "thin_rings", "LIFE_exozodi_samples": 256.5},
+            {"LIFE_background_method": "grid", "LIFE_exozodi_method": "thin_rings"},
+            {"LIFE_exozodi_method": "hankel_log", "LIFE_fov_boundary": "square"},
+        )
+
+        for values in invalid:
+            with self.subTest(values=values):
+                with self.assertRaises(ValueError):
+                    LIFEOpticalSystem.get_life_background_configuration(
+                        {**base, **values}
+                    )
+
+    def test_analytical_thin_ring_transmission(self):
+        """Compare analytical ring transmission with direct angular integration."""
+        optical = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+        optical.pupilDiam = 3.0 * u.m
+        optical.pupilArea = np.pi * (1.5 * u.m) ** 2
+
+        positions = reference_collector_positions(np.array([0.0]) * u.rad)[0]
+
+        wavelengths = np.array([10.0, 12.0]) * u.um
+        widths = np.array([0.3, 0.36]) * u.um
+
+        radius = 0.5e-6
+
+        fluxes = np.array([[1000.0, 1500.0]]) * (u.photon / (u.s * u.m**2 * u.um))
+
+        mode = {
+            "LIFE_fov_boundary": "circle",
+            "LIFE_fov_taper": "none",
+            "attenuation": 0.05,
+            "inst": {"QE": lambda _: 0.7 / u.photon},
+        }
+
+        actual = optical.get_thin_ring_background_rates(
+            positions,
+            wavelengths,
+            widths,
+            np.full((1, 2), radius) * u.rad,
+            fluxes,
+            mode,
+        )
+
+        phi = np.linspace(0, 2 * np.pi, 8192, endpoint=False)
+
+        sky = radius * np.column_stack((np.cos(phi), np.sin(phi))) * u.rad
+
+        transmission = optical.get_transmission(positions, wavelengths, sky)
+
+        factor = (
+            optical.total_collecting_area
+            * widths
+            * mode["attenuation"]
+            * mode["inst"]["QE"](wavelengths)
+        )
+
+        for result, direct in zip(actual, transmission[:2], strict=True):
+            expected = (direct.mean(axis=1) * fluxes * factor).to(1 / u.s)
+
+            np.testing.assert_allclose(result.value, expected.value, rtol=1e-10)
+
 
 if __name__ == "__main__":
     unittest.main()

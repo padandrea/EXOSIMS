@@ -28,6 +28,59 @@ class LIFEOpticalSystem(OpticalSystem):
     # ================================================================
     # Configure the LIFE instrument and initialize EXOSIMS interfaces.
 
+    @staticmethod
+    def get_life_background_configuration(mode):
+        """Resolve integration settings while preserving legacy defaults."""
+        method = mode.get("LIFE_exozodi_method")
+
+        background = mode.get(
+            "LIFE_background_method",
+            "grid" if method in (None, "grid") else "fourier",
+        )
+
+        if background not in ("grid", "fourier"):
+            raise ValueError("Invalid LIFE_background_method.")
+
+        if method is None:
+            method = "grid" if background == "grid" else "hankel_linear"
+
+        if method not in (
+            "grid",
+            "hankel_linear",
+            "hankel_log",
+            "thin_rings",
+        ):
+            raise ValueError("Invalid LIFE_exozodi_method.")
+
+        if (background == "grid") != (method == "grid"):
+            raise ValueError("Incompatible background and exozodi methods.")
+
+        if background == "fourier" and (
+            mode.get("LIFE_fov_boundary", "square") != "circle"
+            or mode.get("LIFE_fov_taper", "none") != "none"
+        ):
+            raise ValueError("Fourier integration requires an untapered circular FoV.")
+
+        local_samples = mode.get("LIFE_radial_samples", 8193)
+
+        ez_samples = mode.get(
+            "LIFE_exozodi_samples",
+            256 if method in ("hankel_log", "thin_rings") else local_samples,
+        )
+
+        for name, value in (
+            ("LIFE_radial_samples", local_samples),
+            ("LIFE_exozodi_samples", ez_samples),
+        ):
+            if (
+                not isinstance(value, (int, np.integer))
+                or isinstance(value, (bool, np.bool_))
+                or value < 3
+            ):
+                raise ValueError(f"{name} must be an integer >= 3.")
+
+        return background, method, int(local_samples), int(ez_samples)
+
     def populate_observingModes(self, observingModes):
         """Helper method to parse input observingMode dictionaries and assign default
         values, as needed. Also creates the allowed_observingMode_kws attribute.
@@ -94,6 +147,8 @@ class LIFEOpticalSystem(OpticalSystem):
                     "LIFE_local_zodi_model must be 'mennesson' or 'darwinsim'."
                 )
 
+            self.get_life_background_configuration(mode)
+
             # start tracking allowed keywords
 
             self.allowed_observingMode_kws = [
@@ -110,6 +165,10 @@ class LIFEOpticalSystem(OpticalSystem):
                 "LIFE_fov_taper",
                 "LIFE_fov_boundary",
                 "LIFE_local_zodi_model",
+                "LIFE_background_method",
+                "LIFE_radial_samples",
+                "LIFE_exozodi_method",
+                "LIFE_exozodi_samples",
                 "bandpass_model",
                 "bandpass_step",
             ]
@@ -795,6 +854,99 @@ class LIFEOpticalSystem(OpticalSystem):
             (transmission_left * incident_rate).to(1 / u.s),
             (transmission_right * incident_rate).to(1 / u.s),
         )
+
+    def get_thin_ring_background_rates(
+        self,
+        collector_positions,
+        wavelengths,
+        bin_widths,
+        ring_radii,
+        ring_fluxes,
+        mode,
+    ):
+        """Analytical photon rates for FoV-truncated circular thin rings."""
+        if (
+            mode.get("LIFE_fov_boundary", "square") != "circle"
+            or mode.get("LIFE_fov_taper", "none") != "none"
+        ):
+            raise ValueError("Thin rings require an untapered circular FoV.")
+
+        positions = np.asarray(collector_positions.to_value(u.m), dtype=float)
+
+        lam = np.atleast_1d(wavelengths.to_value(u.m))
+        widths = np.atleast_1d(bin_widths.to_value(u.um))
+
+        radii = ring_radii.to_value(u.rad)
+        flux_unit = u.photon / (u.s * u.m**2 * u.um)
+        fluxes = ring_fluxes.to_value(flux_unit)
+
+        if (
+            positions.shape != (4, 2)
+            or not np.all(np.isfinite(positions))
+            or lam.ndim != 1
+            or lam.size == 0
+            or not np.all(np.isfinite(lam))
+            or np.any(lam <= 0)
+            or widths.shape != lam.shape
+            or not np.all(np.isfinite(widths))
+            or np.any(widths <= 0)
+            or radii.ndim != 2
+            or radii.shape != fluxes.shape
+            or radii.shape[1] != lam.size
+            or not np.all(np.isfinite(radii))
+            or not np.all(np.isfinite(fluxes))
+            or np.any(radii < 0)
+            or np.any(fluxes < 0)
+        ):
+            raise ValueError("Invalid thin-ring input.")
+
+        diameter = self.pupilDiam.to_value(u.m)
+        fov = lam / (2.0 * diameter)
+
+        if np.any((radii > fov[None, :] * (1.0 + 1e-12)) & (fluxes > 0)):
+            raise ValueError("Nonzero ring flux outside the FoV.")
+
+        baselines = np.linalg.norm(
+            positions[:, None, :] - positions[None, :, :],
+            axis=-1,
+        )
+
+        phases = np.array(
+            [
+                [0.0, np.pi / 2, np.pi, 3 * np.pi / 2],
+                [0.0, 3 * np.pi / 2, np.pi, np.pi / 2],
+            ]
+        )
+
+        weights = np.cos(phases[:, :, None] - phases[:, None, :]) / 16.0
+
+        arguments = (
+            2.0
+            * np.pi
+            * baselines[None, :, :, None]
+            * radii.T[:, None, None, :]
+            / lam[:, None, None, None]
+        )
+
+        visibility = np.sum(
+            j0(arguments) * fluxes.T[:, None, None, :],
+            axis=-1,
+        )
+
+        integrated = np.einsum("wab,oab->ow", visibility, weights)
+
+        integrated = np.maximum(integrated, 0.0)
+
+        factor = (
+            self.total_collecting_area
+            * (widths * u.um)
+            * mode["attenuation"]
+            * mode["inst"]["QE"](np.atleast_1d(wavelengths))
+        )
+
+        rates = (integrated * flux_unit * factor).to(1 / u.s)
+
+        return rates[0:1], rates[1:2]
 
     def get_axisymmetric_background_rates(
         self,

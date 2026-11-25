@@ -6,6 +6,9 @@ from astropy.constants import c, h, k_B
 
 from EXOSIMS.ZodiacalLight.Mennesson import Mennesson
 
+KENNEDY_TEMPERATURE_1AU_K = 278.3
+KENNEDY_SUBLIMATION_TEMPERATURE_K = 1500.0
+
 
 class LIFEZodiacalLight(Mennesson):
     """LIFE zodiacal-light model extending Mennesson.
@@ -107,7 +110,152 @@ class LIFEZodiacalLight(Mennesson):
         if not np.isfinite(luminosity) or luminosity <= 0:
             raise ValueError("star_luminosity must be positive.")
 
-        return 0.034422617777777775 * np.sqrt(luminosity) * u.au
+        return (
+            (KENNEDY_TEMPERATURE_1AU_K / KENNEDY_SUBLIMATION_TEMPERATURE_K) ** 2
+            * np.sqrt(luminosity)
+            * u.au
+        )
+
+    def get_exozodi_inner_angle(self, star_distance, star_luminosity):
+        """Return the angular dust sublimation radius."""
+        distance = star_distance.to_value(u.m)
+
+        if np.ndim(distance) != 0 or not np.isfinite(distance) or distance <= 0:
+            raise ValueError("star_distance must be finite and positive.")
+
+        radius = self.get_exozodi_inner_radius(star_luminosity)
+
+        return radius.to_value(u.m) / distance * u.rad
+
+    def get_exozodi_radial_profile(
+        self,
+        wavelengths,
+        nEZ,
+        star_distance,
+        star_luminosity,
+        outer_radius,
+        n_samples,
+        spacing="linear",
+    ):
+        """Return a boundary-aligned Kennedy radial brightness profile."""
+        if spacing not in ("linear", "log"):
+            raise ValueError("Invalid radial spacing.")
+
+        if (
+            not isinstance(n_samples, (int, np.integer))
+            or isinstance(n_samples, (bool, np.bool_))
+            or n_samples < 3
+        ):
+            raise ValueError("n_samples must be an integer >= 3.")
+
+        inner = self.get_exozodi_inner_angle(star_distance, star_luminosity).to_value(
+            u.rad
+        )
+
+        outer = outer_radius.to_value(u.rad)
+
+        if np.ndim(outer) != 0 or not np.isfinite(outer) or outer <= 0:
+            raise ValueError("Invalid outer_radius.")
+
+        empty = inner >= outer
+
+        if empty:
+            radii = np.array([0.0])
+        elif spacing == "linear":
+            radii = np.linspace(inner, outer, n_samples)
+        else:
+            radii = np.geomspace(inner, outer, n_samples)
+
+        sky = np.column_stack((radii, np.zeros_like(radii))) * u.rad
+
+        intensity = self.get_exozodi_spectral_radiance(
+            sky_positions=sky,
+            wavelengths=wavelengths,
+            nEZ=nEZ,
+            star_distance=star_distance,
+            star_luminosity=star_luminosity,
+        )
+
+        if empty:
+            return radii[:0] * u.rad, intensity[:0]
+
+        return radii * u.rad, intensity
+
+    def get_exozodi_thin_rings(
+        self,
+        wavelengths,
+        nEZ,
+        star_distance,
+        star_luminosity,
+        fov_radii,
+        n_rings,
+    ):
+        """Approximate Kennedy emission with logarithmic thin rings."""
+        if (
+            not isinstance(n_rings, (int, np.integer))
+            or isinstance(n_rings, (bool, np.bool_))
+            or n_rings < 3
+        ):
+            raise ValueError("n_rings must be an integer >= 3.")
+
+        fov = np.atleast_1d(fov_radii.to_value(u.rad))
+
+        if (
+            fov.shape != np.atleast_1d(wavelengths.value).shape
+            or not np.all(np.isfinite(fov))
+            or np.any(fov <= 0)
+        ):
+            raise ValueError("Invalid FoV radii.")
+
+        inner = self.get_exozodi_inner_angle(star_distance, star_luminosity).to_value(
+            u.rad
+        )
+
+        flux_unit = u.photon / (u.s * u.m**2 * u.um)
+
+        def radiance(radii):
+            sky = np.column_stack((radii, np.zeros_like(radii))) * u.rad
+
+            return self.get_exozodi_spectral_radiance(
+                sky_positions=sky,
+                wavelengths=wavelengths,
+                nEZ=nEZ,
+                star_distance=star_distance,
+                star_luminosity=star_luminosity,
+            ).to_value(flux_unit / u.sr)
+
+        if inner >= fov.max():
+            radiance(np.array([0.0]))
+
+            return (
+                np.empty((0, fov.size)) * u.rad,
+                np.empty((0, fov.size)) * flux_unit,
+            )
+
+        edges = np.geomspace(inner, fov.max(), n_rings + 1)
+        centres = np.sqrt(edges[:-1] * edges[1:])
+        intensity = radiance(centres)
+
+        lo = edges[:-1, None]
+        hi = np.maximum(lo, np.minimum(edges[1:, None], fov[None, :]))
+
+        radii = np.sqrt(lo * hi)
+
+        index = np.clip(
+            np.searchsorted(edges, fov, side="left") - 1,
+            0,
+            n_rings - 1,
+        )
+
+        column = np.arange(fov.size)
+
+        intensity[index, column] = np.diag(radiance(radii[index, column]))
+
+        fluxes = np.pi * (hi**2 - lo**2) * intensity
+
+        radii = np.where(hi > lo, radii, 0.0)
+
+        return radii * u.rad, fluxes * flux_unit
 
     def get_exozodi_spectral_radiance(
         self,
@@ -212,7 +360,9 @@ class LIFEZodiacalLight(Mennesson):
         safe_radius_au = np.maximum(radius_au, inner_radius_au)
 
         # Dust temperature in K.
-        temperature = (278.3 * luminosity**0.25 / np.sqrt(safe_radius_au)) * u.K
+        temperature = (
+            KENNEDY_TEMPERATURE_1AU_K * luminosity**0.25 / np.sqrt(safe_radius_au)
+        ) * u.K
 
         # Dimensionless dust surface density / optical depth.
         sigma = (
