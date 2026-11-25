@@ -812,6 +812,10 @@ class LIFEOpticalSystem(OpticalSystem):
 
         The source radiance is supplied by LIFEZodiacalLight.
         Requires a circular field of view without Gaussian taper.
+
+        The first radial sample may be nonzero. In that case,
+        the source is assumed to have zero radiance inside that
+        radius, with the first sample giving the outer-side limit.
         """
         if (
             mode.get("LIFE_fov_taper", "none") != "none"
@@ -838,7 +842,8 @@ class LIFEOpticalSystem(OpticalSystem):
             raise ValueError("Wavelength widths do not match.")
         if (
             theta.size < 3
-            or theta[0] != 0
+            or theta[0] < 0
+            or not np.all(np.isfinite(theta))
             or not np.all(np.diff(theta) > 0)
             or not np.all(np.isfinite(intensity))
             or np.any(intensity < 0)
@@ -863,6 +868,10 @@ class LIFEOpticalSystem(OpticalSystem):
 
         for k, wavelength in enumerate(lam):
             fov_radius = wavelength / (2.0 * diameter)
+
+            # The field of view may end inside the source cavity.
+            if fov_radius <= theta[0]:
+                continue
 
             # Include the exact field-of-view boundary.
             end = np.searchsorted(theta, fov_radius, side="left")

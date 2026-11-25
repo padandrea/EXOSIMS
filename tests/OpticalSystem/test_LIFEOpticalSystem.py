@@ -2130,9 +2130,7 @@ class TestLIFEOpticalSystem(unittest.TestCase):
         wavelengths = np.array([8.0, 16.0]) * u.um
         widths = np.array([0.24, 0.48]) * u.um
         sky = np.array([[500.0, 400.0]]) * u.mas
-        radiance = np.full((1, 2), 100.0) * u.photon / (
-            u.s * u.m**2 * u.um * u.sr
-        )
+        radiance = np.full((1, 2), 100.0) * u.photon / (u.s * u.m**2 * u.um * u.sr)
         areas = np.array([1.0e-12]) * u.sr
         square = {**life.observingModes[0], "LIFE_fov_boundary": "square"}
         circle = {**square, "LIFE_fov_boundary": "circle"}
@@ -2178,14 +2176,134 @@ class TestLIFEOpticalSystem(unittest.TestCase):
         wavelengths = np.array([10.0]) * u.um
         widths = np.array([0.3]) * u.um
         sky = np.array([[100.0, 0.0]]) * u.mas
-        radiance = np.full((1, 1), 100.0) * u.photon / (
-            u.s * u.m**2 * u.um * u.sr
-        )
+        radiance = np.full((1, 1), 100.0) * u.photon / (u.s * u.m**2 * u.um * u.sr)
         with self.assertRaisesRegex(ValueError, "LIFE_fov_boundary"):
             life.get_extended_background_rates(
-                positions, wavelengths, widths, sky, radiance,
+                positions,
+                wavelengths,
+                widths,
+                sky,
+                radiance,
                 np.array([1.0e-12]) * u.sr,
                 {**life.observingModes[0], "LIFE_fov_boundary": "hexagon"},
+            )
+
+    def test_fourier_invalid_radial_grid(self):
+        """Reject invalid Fourier radial sampling."""
+        optical = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+        optical.pupilDiam = 3.0 * u.m
+        optical.pupilArea = np.pi * (1.5 * u.m) ** 2
+
+        positions = reference_collector_positions(np.array([0.0]) * u.rad)[0]
+
+        wavelengths = np.array([10.0, 12.0]) * u.um
+        widths = np.array([0.3, 0.36]) * u.um
+
+        intensity = np.ones((3, 2)) * (u.photon / (u.s * u.m**2 * u.um * u.sr))
+
+        mode = {
+            "LIFE_fov_boundary": "circle",
+            "LIFE_fov_taper": "none",
+        }
+
+        for radii in (
+            [-1e-6, 0.0, 2e-6],
+            [0.0, 1e-6, np.inf],
+            [0.0, 2e-6, 1e-6],
+            [0.0, 1e-6, 1e-6],
+        ):
+            with self.subTest(radii=radii):
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid radial source sampling"
+                ):
+                    optical.get_axisymmetric_background_rates(
+                        positions,
+                        wavelengths,
+                        widths,
+                        np.array(radii) * u.rad,
+                        intensity,
+                        mode,
+                    )
+
+    def test_fourier_uniform_annulus(self):
+        """Compare Fourier quadrature with an analytical annulus."""
+        from scipy.special import j1
+
+        optical = LIFEOpticalSystem.__new__(LIFEOpticalSystem)
+        optical.pupilDiam = 3.0 * u.m
+        optical.pupilArea = np.pi * (1.5 * u.m) ** 2
+
+        positions = reference_collector_positions(np.array([0.0]) * u.rad)[0]
+
+        wavelengths = np.array([10.0, 12.0]) * u.um
+        widths = np.array([0.3, 0.36]) * u.um
+
+        mode = {
+            "LIFE_fov_boundary": "circle",
+            "LIFE_fov_taper": "none",
+            "attenuation": 0.05,
+            "inst": {"QE": lambda lam: (np.ones(len(np.atleast_1d(lam))) / u.photon)},
+        }
+
+        inner = 1.8e-6
+        outer = wavelengths[1].to_value(u.m) / (2.0 * optical.pupilDiam.to_value(u.m))
+        radii = np.linspace(inner, outer, 8193)
+
+        intensity = np.full((len(radii), 2), 1e12) * (
+            u.photon / (u.s * u.m**2 * u.um * u.sr)
+        )
+
+        actual = optical.get_axisymmetric_background_rates(
+            positions,
+            wavelengths,
+            widths,
+            radii * u.rad,
+            intensity,
+            mode,
+        )
+
+        p = positions.to_value(u.m)
+        baselines = np.linalg.norm(p[:, None, :] - p[None, :, :], axis=-1)
+
+        k = 2 * np.pi * baselines / wavelengths[1].to_value(u.m)
+
+        integral = np.full_like(k, np.pi * (outer**2 - inner**2))
+
+        nonzero = k != 0
+        q = k[nonzero]
+
+        integral[nonzero] = (
+            2 * np.pi * (outer * j1(q * outer) - inner * j1(q * inner)) / q
+        )
+
+        for output, phases in enumerate(
+            (
+                [0, np.pi / 2, np.pi, 3 * np.pi / 2],
+                [0, 3 * np.pi / 2, np.pi, np.pi / 2],
+            )
+        ):
+            np.testing.assert_array_equal(actual[output].value[:, 0], 0.0)
+
+            phases = np.asarray(phases)
+            weights = np.cos(phases[:, None] - phases[None, :]) / 16.0
+
+            expected = (
+                np.sum(weights * integral)
+                * u.sr
+                * intensity[0, 1]
+                * optical.total_collecting_area
+                * widths[1]
+                * mode["attenuation"]
+                * mode["inst"]["QE"](wavelengths)[1]
+            ).to_value(1 / u.s)
+
+            self.assertGreater(expected, 0.0)
+
+            np.testing.assert_allclose(
+                actual[output].value[0, 1],
+                expected,
+                rtol=2e-5,
+                atol=0,
             )
 
 

@@ -139,9 +139,7 @@ class TestLIFEZodiacalLight(unittest.TestCase):
             np.array([135.0]) * u.deg,
             np.array([45.0]) * u.deg,
             photon_units=True,
-        )[0] * self.zodi.zodi_color_correction_factor(
-            wavelengths, photon_units=True
-        )
+        )[0] * self.zodi.zodi_color_correction_factor(wavelengths, photon_units=True)
         actual = self.zodi.get_local_zodi_spectral_radiance(
             wavelengths, 135 * u.deg, 45 * u.deg
         )
@@ -154,19 +152,26 @@ class TestLIFEZodiacalLight(unittest.TestCase):
         wavelength = 10.0e-6
         lon, lat = np.deg2rad([135.0, 45.0])
         thermal = lambda temp: (
-            2 * c_si / wavelength**4
+            2
+            * c_si
+            / wavelength**4
             / np.expm1(h_si * c_si / (wavelength * k_si * temp))
             * 1.0e-6  # per metre -> per micrometre
         )
         geometry = np.sqrt(
-            np.pi / np.arccos(np.cos(lon) * np.cos(lat))
+            np.pi
+            / np.arccos(np.cos(lon) * np.cos(lat))
             / (np.sin(lat) ** 2 + (0.6 * (10.0 / 11.0) ** (-0.4) * np.cos(lat)) ** 2)
         )
-        expected = 4.0e-8 * geometry * (
-            thermal(265) + 0.22 * (0.00465047 / 1.5) ** 2 * thermal(5777)
+        expected = (
+            4.0e-8
+            * geometry
+            * (thermal(265) + 0.22 * (0.00465047 / 1.5) ** 2 * thermal(5777))
         )
         actual = self.zodi.get_local_zodi_spectral_radiance(
-            np.array([10.0]) * u.um, 135 * u.deg, 45 * u.deg,
+            np.array([10.0]) * u.um,
+            135 * u.deg,
+            45 * u.deg,
             model="darwinsim",
         )
         self.assertEqual(actual.shape, (1,))
@@ -197,3 +202,38 @@ class TestLIFEZodiacalLight(unittest.TestCase):
                 star_distance=10 * u.pc,
                 star_luminosity=1.0,
             )
+
+    def test_inner_radius_scaling(self):
+        """Verify the Kennedy inner dust radius scaling."""
+        for luminosity in (0.01, 1.0, 4.0, 100.0):
+            with self.subTest(luminosity=luminosity):
+                expected = 0.034422617777777775 * np.sqrt(luminosity)
+
+                for value in (luminosity, luminosity * u.Lsun):
+                    actual = self.zodi.get_exozodi_inner_radius(value)
+                    self.assertAlmostEqual(actual.to_value(u.au), expected, places=14)
+
+    def test_exact_dust_boundary(self):
+        """Verify the dust-side limit at the inner boundary."""
+        distance = 10.0 * u.pc
+
+        for luminosity in (0.01, 1.0, 4.0, 100.0):
+            with self.subTest(luminosity=luminosity):
+                edge = self.zodi.get_exozodi_inner_radius(luminosity).to_value(
+                    u.m
+                ) / distance.to_value(u.m)
+
+                radii = edge * np.array([1.0 - 1e-8, 1.0, 1.0 + 1e-8])
+                sky = np.column_stack((radii, np.zeros_like(radii))) * u.rad
+
+                rates = self.zodi.get_exozodi_spectral_radiance(
+                    sky_positions=sky,
+                    wavelengths=np.array([10.0, 12.0]) * u.um,
+                    nEZ=1.0,
+                    star_distance=distance,
+                    star_luminosity=luminosity,
+                ).value
+
+                np.testing.assert_array_equal(rates[0], 0.0)
+                self.assertTrue(np.all(rates[1:] > 0))
+                np.testing.assert_allclose(rates[1], rates[2], rtol=1e-6)

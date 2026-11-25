@@ -529,15 +529,74 @@ class TestLIFESurveySimulation(unittest.TestCase):
         darwinsim = survey.get_life_zodiacal_rates(**parameters)
         self.assertTrue(np.all(darwinsim["local_left"] > 0 / u.s))
         self.assertTrue(np.all(darwinsim["local_right"] > 0 / u.s))
-        self.assertFalse(np.allclose(
-            default["local_left"].to_value(1 / u.s),
-            darwinsim["local_left"].to_value(1 / u.s),
-            rtol=1e-5, atol=1e-10,
-        ))
+        self.assertFalse(
+            np.allclose(
+                default["local_left"].to_value(1 / u.s),
+                darwinsim["local_left"].to_value(1 / u.s),
+                rtol=1e-5,
+                atol=1e-10,
+            )
+        )
         np.testing.assert_array_equal(
             default["exozodi_left"].value,
             darwinsim["exozodi_left"].value,
         )
+
+    def _make_fourier_observation(self, inner_angle=None):
+        """Construct a Fourier observation with a chosen dust edge."""
+        survey = make_survey()
+        survey.OpticalSystem.pupilDiam = 3.0 * u.m
+        observation = make_observation()
+
+        observation["mode"].update(
+            {
+                "LIFE_background_method": "fourier",
+                "LIFE_fov_boundary": "circle",
+                "LIFE_fov_taper": "none",
+                "LIFE_radial_samples": 8193,
+            }
+        )
+
+        if inner_angle is not None:
+            radius = survey.ZodiacalLight.get_exozodi_inner_radius(1.0)
+            distance = radius.to_value(u.m) / inner_angle * u.m
+            survey.TargetList.dist[0] = distance.to(u.pc)
+
+        return survey, observation
+
+    def test_fourier_fov_inside_cavity(self):
+        """Exozodi vanishes if the entire FoV lies inside the cavity."""
+        survey, obs = self._make_fourier_observation(2.1e-6)
+
+        rates = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+        for key in ("exozodi_left", "exozodi_right"):
+            np.testing.assert_array_equal(rates[key].value, 0.0)
+
+        for key in ("local_left", "local_right"):
+            self.assertTrue(np.all(rates[key].value > 0))
+
+    def test_fourier_fov_partial_overlap(self):
+        """Only wavelengths whose FoV reaches the disk detect dust."""
+        survey, obs = self._make_fourier_observation(1.8e-6)
+
+        rates = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+        for key in ("exozodi_left", "exozodi_right"):
+            np.testing.assert_array_equal(rates[key].value[:, 0], 0.0)
+            self.assertTrue(np.all(rates[key].value[:, 1] > 0))
+
+    def test_fourier_zero_dust(self):
+        """Zero dust abundance gives zero exozodiacal photon rates."""
+        survey, obs = self._make_fourier_observation()
+
+        rates = survey.get_life_zodiacal_rates(**obs, nEZ=0.0)
+
+        for key in ("exozodi_left", "exozodi_right"):
+            np.testing.assert_array_equal(rates[key].value, 0.0)
+
+        for key in ("local_left", "local_right"):
+            self.assertTrue(np.all(rates[key].value > 0))
 
 
 if __name__ == "__main__":

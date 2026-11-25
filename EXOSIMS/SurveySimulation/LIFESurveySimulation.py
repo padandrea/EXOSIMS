@@ -185,7 +185,6 @@ class LIFESurveySimulation(SurveySimulation):
             max_radius = np.max(wavelengths.to_value(u.m)) / (2.0 * diameter)
 
             radii = np.linspace(0.0, max_radius, n_radial)
-            radial_positions = np.column_stack((radii, np.zeros_like(radii))) * u.rad
 
             local_spectrum = ZL.get_local_zodi_spectral_radiance(
                 wavelengths=wavelengths,
@@ -202,8 +201,24 @@ class LIFESurveySimulation(SurveySimulation):
                 * local_spectrum.unit
             )
 
+            # The local foreground extends to the optical axis.
+            # Exozodi begins at the physical inner dust boundary.
+            inner_angle = ZL.get_exozodi_inner_radius(star_luminosity).to_value(
+                u.m
+            ) / star_distance.to_value(u.m)
+
+            dust_in_fov = inner_angle < max_radius
+
+            ez_radii = (
+                np.linspace(inner_angle, max_radius, n_radial) if dust_in_fov else radii
+            )
+
+            exozodi_positions = (
+                np.column_stack((ez_radii, np.zeros_like(ez_radii))) * u.rad
+            )
+
             exozodi_radial = ZL.get_exozodi_spectral_radiance(
-                sky_positions=radial_positions,
+                sky_positions=exozodi_positions,
                 wavelengths=wavelengths,
                 nEZ=nEZ,
                 star_distance=star_distance,
@@ -228,14 +243,20 @@ class LIFESurveySimulation(SurveySimulation):
                 mode,
             )
 
-            exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
-                reference_positions,
-                wavelengths,
-                bin_widths,
-                radii * u.rad,
-                exozodi_radial,
-                mode,
-            )
+            if dust_in_fov:
+                exozodi_left, exozodi_right = OS.get_axisymmetric_background_rates(
+                    reference_positions,
+                    wavelengths,
+                    bin_widths,
+                    ez_radii * u.rad,
+                    exozodi_radial,
+                    mode,
+                )
+            else:
+                # All wavelength-dependent FoVs lie inside the
+                # dust cavity. No exozodi photons are transmitted.
+                exozodi_left = np.zeros_like(local_left.value) * local_left.unit
+                exozodi_right = np.zeros_like(local_right.value) * local_right.unit
 
             n_rotations = positions.shape[0]
 

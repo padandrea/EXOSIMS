@@ -63,9 +63,7 @@ class LIFEZodiacalLight(Mennesson):
                 np.atleast_1d(latitude.to(u.deg)),
                 photon_units=True,
             )
-            color = self.zodi_color_correction_factor(
-                wavelength, photon_units=True
-            )
+            color = self.zodi_color_correction_factor(wavelength, photon_units=True)
             return (reference[0] * color).to(radiance_unit)
 
         if abs(lat) > np.pi / 2:
@@ -79,8 +77,7 @@ class LIFEZodiacalLight(Mennesson):
 
         lambda_ratio = wavelength.to_value(u.um) / 11.0
         geometry_denominator = (
-            np.sin(lat) ** 2
-            + (0.6 * lambda_ratio ** (-0.4) * np.cos(lat)) ** 2
+            np.sin(lat) ** 2 + (0.6 * lambda_ratio ** (-0.4) * np.cos(lat)) ** 2
         )
         geometry = np.sqrt(np.pi / elongation / geometry_denominator)
 
@@ -89,17 +86,28 @@ class LIFEZodiacalLight(Mennesson):
             exponent = (h * c / (wavelength * k_B * temperature)).decompose().value
             with np.errstate(over="ignore"):
                 return (
-                    2.0 * c * u.photon
-                    / (wavelength**4 * u.sr * np.expm1(exponent))
+                    2.0 * c * u.photon / (wavelength**4 * u.sr * np.expm1(exponent))
                 ).to(radiance_unit)
 
         thermal = planck_photons(265.0 * u.K)
-        scattered = (
-            0.22
-            * (0.00465047 / 1.5) ** 2
-            * planck_photons(5777.0 * u.K)
-        )
+        scattered = 0.22 * (0.00465047 / 1.5) ** 2 * planck_photons(5777.0 * u.K)
         return (4.0e-8 * geometry * (thermal + scattered)).to(radiance_unit)
+
+    @staticmethod
+    def get_exozodi_inner_radius(
+        star_luminosity: float | u.Quantity,
+    ) -> u.Quantity:
+        """Return the Kennedy model's inner dust radius in AU."""
+        luminosity = (
+            float(star_luminosity.to_value(u.Lsun))
+            if isinstance(star_luminosity, u.Quantity)
+            else float(star_luminosity)
+        )
+
+        if not np.isfinite(luminosity) or luminosity <= 0:
+            raise ValueError("star_luminosity must be positive.")
+
+        return 0.034422617777777775 * np.sqrt(luminosity) * u.au
 
     def get_exozodi_spectral_radiance(
         self,
@@ -185,15 +193,20 @@ class LIFEZodiacalLight(Mennesson):
             raise ValueError("nEZ must be non-negative.")
 
         # Projected physical distance from the star in AU.
-        radius_au = np.linalg.norm(theta, axis=1) * distance_m / u.au.to(u.m)
+        angular_radius = np.linalg.norm(theta, axis=1)
+        radius_au = angular_radius * distance_m / u.au.to(u.m)
 
         # Kennedy et al. (2015) radial model.
         alpha = 0.34
         sigma_zero = 7.11889e-8
         reference_radius_au = np.sqrt(luminosity)
-        inner_radius_au = 0.034422617777777775 * np.sqrt(luminosity)
+        inner_radius = self.get_exozodi_inner_radius(luminosity)
+        inner_radius_au = inner_radius.to_value(u.au)
 
-        valid = radius_au >= inner_radius_au
+        # Compare angular radii directly to evaluate the dust-side
+        # limit consistently at the integration boundary.
+        inner_angle = inner_radius.to_value(u.m) / distance_m
+        valid = angular_radius >= inner_angle
 
         # Avoid division by zero at the star's position.
         safe_radius_au = np.maximum(radius_au, inner_radius_au)
