@@ -325,3 +325,78 @@ class TestLIFEZodiacalLight(unittest.TestCase):
                 self.assertTrue(np.all(np.isfinite(actual.value)))
 
                 np.testing.assert_allclose(actual.value, expected.value, rtol=1e-12)
+
+    def test_jwst_lookup_and_interpolation(self):
+        """Check absolute coordinates, interpolation and cached loading."""
+        import tempfile
+        from pathlib import Path
+
+        table = (
+            np.arange(3, 21)[:, None, None] * 1000.0
+            + np.arange(300)[None, :, None] * 2.0
+            + np.arange(300)[None, None, :]
+        )
+
+        with tempfile.TemporaryDirectory() as folder:
+
+            path = Path(folder) / "jwst.npy"
+            np.save(path, table)
+
+            zodi = LIFEZodiacalLight(jwst_local_zodi_path=path, verbose=False)
+
+            args = dict(
+                wavelengths=np.array([10, 10.5, 11]) * u.um,
+                longitude=135 * u.deg,
+                latitude=45 * u.deg,
+                model="jwst",
+                absolute_longitude=120 * u.deg,
+            )
+
+            result = zodi.get_local_zodi_spectral_radiance(**args)
+
+            self.assertTrue(
+                result.unit.is_equivalent(u.photon / (u.s * u.m**2 * u.um * u.sr))
+            )
+
+            np.testing.assert_allclose(result.value, [10275, 10775, 11275])
+
+            cached = zodi._jwst_local_zodi_table
+
+            args["absolute_longitude"] = 480 * u.deg
+            periodic = zodi.get_local_zodi_spectral_radiance(**args)
+
+            np.testing.assert_array_equal(periodic.value, result.value)
+            self.assertIs(cached, zodi._jwst_local_zodi_table)
+
+            args["latitude"] = -45 * u.deg
+            southern = zodi.get_local_zodi_spectral_radiance(**args)
+
+            np.testing.assert_allclose(southern.value, [10425, 10925, 11425])
+
+            for latitude in (-90, 90):
+                args["latitude"] = latitude * u.deg
+                pole = zodi.get_local_zodi_spectral_radiance(**args)
+                self.assertTrue(np.all(np.isfinite(pole.value)))
+
+    def test_jwst_rejects_unsupported_inputs(self):
+        """No silent spectral or observing-geometry extrapolation."""
+        args = dict(
+            wavelengths=10 * u.um,
+            longitude=135 * u.deg,
+            latitude=45 * u.deg,
+            model="jwst",
+            absolute_longitude=120 * u.deg,
+        )
+
+        with self.assertRaisesRegex(ValueError, "path"):
+            self.zodi.get_local_zodi_spectral_radiance(**args)
+
+        for changes in (
+            {"wavelengths": 2 * u.um},
+            {"wavelengths": 21 * u.um},
+            {"longitude": 90 * u.deg},
+            {"absolute_longitude": None},
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(ValueError):
+                    self.zodi.get_local_zodi_spectral_radiance(**{**args, **changes})

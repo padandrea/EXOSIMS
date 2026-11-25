@@ -1,5 +1,7 @@
 """Zodiacal-light source models for the LIFE mid-infrared interferometer."""
 
+from pathlib import Path
+
 import astropy.units as u
 import numpy as np
 from astropy.constants import c, h, k_B
@@ -20,12 +22,49 @@ class LIFEZodiacalLight(Mennesson):
     of Kennedy et al. (2015).
     """
 
+    def __init__(self, *args, jwst_local_zodi_path=None, **specs):
+        """Initialize the optional, offline JWST lookup table."""
+        super().__init__(*args, **specs)
+
+        self.jwst_local_zodi_path = (
+            None
+            if jwst_local_zodi_path is None
+            else str(Path(jwst_local_zodi_path).expanduser())
+        )
+
+        self._jwst_local_zodi_table = None
+        self._outspec["jwst_local_zodi_path"] = self.jwst_local_zodi_path
+
+    def _load_jwst_local_zodi_table(self):
+        """Load and cache a canonical wavelength/longitude/latitude table."""
+        if self._jwst_local_zodi_table is None:
+
+            if self.jwst_local_zodi_path is None:
+                raise ValueError("JWST requires jwst_local_zodi_path.")
+
+            data = np.load(self.jwst_local_zodi_path, allow_pickle=False)
+
+            if (
+                data.shape != (18, 300, 300)
+                or not np.issubdtype(data.dtype, np.floating)
+                or not np.all(np.isfinite(data))
+                or np.any(data < 0)
+            ):
+                raise ValueError("Invalid JWST local-zodi lookup table.")
+
+            data.setflags(write=False)
+            self._jwst_local_zodi_table = data
+
+        return self._jwst_local_zodi_table
+
     def get_local_zodi_spectral_radiance(
         self,
         wavelengths: u.Quantity,
         longitude: u.Quantity,
         latitude: u.Quantity,
         model: str = "mennesson",
+        *,
+        absolute_longitude: u.Quantity | None = None,
     ) -> u.Quantity:
         """Local-zodiacal photon spectral radiance at the observer.
 
@@ -34,9 +73,16 @@ class LIFEZodiacalLight(Mennesson):
         265 K dust + scattered-sunlight prescription, including its
         wavelength-dependent ecliptic geometry factor. Unlike the
         reference LIFEsim code, longitude is passed explicitly.
+
+        The optional JWST model uses a canonical offline table of
+        photon spectral radiance per micrometre. Its absolute
+        ecliptic longitude must be supplied separately from the
+        solar-relative longitude. The table represents the static
+        minimum-background +/-135 degree observing strategy.
+        Spatial lookup follows the original nearest-pixel convention.
         """
-        if model not in ("mennesson", "darwinsim"):
-            raise ValueError("model must be 'mennesson' or 'darwinsim'.")
+        if model not in ("mennesson", "darwinsim", "jwst"):
+            raise ValueError("Unknown local-zodi model.")
         if not all(
             isinstance(value, u.Quantity)
             for value in (wavelengths, longitude, latitude)
@@ -62,6 +108,50 @@ class LIFEZodiacalLight(Mennesson):
         radiance_unit = u.photon / (u.s * u.m**2 * u.um * u.sr)
         if abs(lat) > np.pi / 2:
             raise ValueError("ecliptic latitude must be within [-90, 90] deg.")
+
+        if model == "jwst":
+            # The static JWST table represents the lower-background
+            # observing opportunity at relative longitude +/-135 deg.
+            relative_lon = abs((longitude.to_value(u.deg) + 180) % 360 - 180)
+
+            if not np.isclose(relative_lon, 135, rtol=0, atol=1e-8):
+                raise ValueError(
+                    "The JWST table supports only the +/-135 deg strategy."
+                )
+
+            if not isinstance(absolute_longitude, u.Quantity):
+                raise ValueError("JWST requires absolute ecliptic longitude.")
+
+            absolute_lon = np.asarray(absolute_longitude.to_value(u.deg))
+
+            if absolute_lon.ndim != 0 or not np.isfinite(absolute_lon):
+                raise ValueError("Invalid absolute ecliptic longitude.")
+
+            wl_um = np.atleast_1d(wavelengths.to_value(u.um))
+
+            if np.any(wl_um < 3 - 1e-12) or np.any(wl_um > 20 + 1e-12):
+                raise ValueError("JWST lookup wavelengths must be between 3 and 20 um.")
+
+            ilon = int(np.rint(299 * (absolute_lon % 360) / 360))
+
+            ilat = int(
+                np.clip(
+                    np.rint(150 - 299 * latitude.to_value(u.deg) / 180),
+                    0,
+                    299,
+                )
+            )
+
+            table = self._load_jwst_local_zodi_table()
+
+            # Canonical table values are already expressed per um.
+            values = np.interp(
+                np.clip(wl_um, 3, 20),
+                np.arange(3, 21),
+                table[:, ilon, ilat],
+            )
+
+            return values * radiance_unit
 
         if model == "mennesson":
             # Leinert Table 17 covers solar-relative longitude

@@ -165,9 +165,9 @@ class LIFEOpticalSystem(OpticalSystem):
             mode["LIFE_local_zodi_model"] = mode.get(
                 "LIFE_local_zodi_model", "mennesson"
             )
-            if mode["LIFE_local_zodi_model"] not in ("mennesson", "darwinsim"):
+            if mode["LIFE_local_zodi_model"] not in ("mennesson", "darwinsim", "jwst"):
                 raise ValueError(
-                    "LIFE_local_zodi_model must be 'mennesson' or 'darwinsim'."
+                    "LIFE_local_zodi_model must be 'mennesson', 'darwinsim', or 'jwst'."
                 )
 
             self.get_life_background_configuration(mode)

@@ -2,6 +2,7 @@
 
 import astropy.units as u
 import numpy as np
+from astropy.coordinates import BarycentricMeanEcliptic
 
 from EXOSIMS.Prototypes.SurveySimulation import SurveySimulation
 
@@ -122,7 +123,7 @@ class LIFESurveySimulation(SurveySimulation):
 
         Notes:
             The exozodi is face-on and axisymmetric.
-            The local foreground uses Mennesson by default, or Darwinsim.
+            The local foreground uses Mennesson, Darwinsim, or JWST.
             Optical field-of-view attenuation is not added here.
         """
         if (
@@ -195,12 +196,25 @@ class LIFESurveySimulation(SurveySimulation):
         # Local zodiacal light: source brightness
         # -----------------------------------------------------
 
-        local_spectrum = ZL.get_local_zodi_spectral_radiance(
-            wavelengths=wavelengths,
-            longitude=local_zodi_longitude,
-            latitude=local_zodi_latitude,
-            model=mode.get("LIFE_local_zodi_model", "mennesson"),
-        )
+        local_model = mode.get("LIFE_local_zodi_model", "mennesson")
+
+        local_arguments = {
+            "wavelengths": wavelengths,
+            "longitude": local_zodi_longitude,
+            "latitude": local_zodi_latitude,
+            "model": local_model,
+        }
+
+        if local_model == "jwst":
+            if getattr(TL, "coords", None) is None:
+                raise ValueError("JWST requires absolute target coordinates.")
+
+            ecliptic = TL.coords[sInd].transform_to(BarycentricMeanEcliptic())
+
+            local_arguments["absolute_longitude"] = ecliptic.lon
+            local_arguments["latitude"] = ecliptic.lat
+
+        local_spectrum = ZL.get_local_zodi_spectral_radiance(**local_arguments)
 
         # -----------------------------------------------------
         # Local zodiacal light: instrument transmission

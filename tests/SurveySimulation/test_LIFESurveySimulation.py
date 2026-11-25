@@ -781,6 +781,66 @@ class TestLIFESurveySimulation(unittest.TestCase):
 
         self.assertTrue(np.all(rates["local_left"].value > 0))
 
+    def test_jwst_absolute_coordinates_and_analytic_integration(self):
+        """JWST coordinates come from the target, not solar longitude."""
+        from astropy.coordinates import SkyCoord, BarycentricMeanEcliptic
+
+        survey, obs = self._make_fourier_observation()
+
+        survey.TargetList.coords = SkyCoord(
+            lon=[120] * u.deg,
+            lat=[-45] * u.deg,
+            frame=BarycentricMeanEcliptic(),
+        )
+
+        zodi = survey.ZodiacalLight
+
+        zodi._jwst_local_zodi_table = np.broadcast_to(
+            np.arange(3, 21)[:, None, None] * 1e12,
+            (18, 300, 300),
+        )
+
+        obs["mode"].update(
+            {
+                "LIFE_local_zodi_model": "jwst",
+                "LIFE_local_zodi_method": "analytic",
+                "LIFE_exozodi_method": "hankel_log",
+                "LIFE_exozodi_samples": 256,
+                "LIFE_radial_samples": 32769,
+            }
+        )
+
+        with patch.object(
+            zodi,
+            "get_local_zodi_spectral_radiance",
+            wraps=zodi.get_local_zodi_spectral_radiance,
+        ) as model:
+
+            analytic = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+            kwargs = model.call_args.kwargs
+
+            self.assertAlmostEqual(kwargs["absolute_longitude"].to_value(u.deg), 120)
+
+            self.assertAlmostEqual(kwargs["latitude"].to_value(u.deg), -45)
+
+        obs["mode"]["LIFE_local_zodi_method"] = "hankel_linear"
+
+        numerical = survey.get_life_zodiacal_rates(**obs, nEZ=1.0)
+
+        for key in ("local_left", "local_right"):
+            np.testing.assert_allclose(
+                analytic[key].value,
+                numerical[key].value,
+                rtol=1e-7,
+            )
+
+        for key in ("exozodi_left", "exozodi_right"):
+            np.testing.assert_array_equal(
+                analytic[key].value,
+                numerical[key].value,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
